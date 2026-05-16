@@ -1,0 +1,121 @@
+# ── secrets / local-only ──────────────────────────────────────────────
+# Belt-and-braces: if any of these ever exist in this tree, they MUST NOT
+# leave it. Repo is currently private; will go public — old commits are
+# forever, so prevent the leak now.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.cer
+*.mobileprovision
+secrets/
+credentials.json
+
+# ── node / vite ───────────────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+.eslintcache
+.stylelintcache
+
+# ── rust / cargo / tauri ──────────────────────────────────────────────
+# (also covered in src-tauri/.gitignore; duplicated here so anyone running
+# `find . -name target -type d` ignores nested target dirs too.)
+target/
+**/target/
+src-tauri/gen/schemas/
+src-tauri/WixTools/
+
+# ── tauri bundle outputs (built installers / .app / .dmg / .msi) ──────
+src-tauri/target/
+src-tauri/.bundle/
+
+# ── logs (dev process, runtime debug log) ─────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+/tmp/termic-*.log
+termic-debug.log
+
+# ── editor / IDE ──────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+.cursor/
+.zed/
+
+# ── macOS ─────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Linux ─────────────────────────────────────────────────────────────
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ── Windows ───────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# ── tauri signing keys (NEVER commit) ─────────────────────────────────
+# `cargo tauri signer generate` outputs these. Public key goes in
+# tauri.conf.json + repo; private key lives in CI secrets only.
+*.tauri.key
+*.tauri.key.pub
+~/.tauri/
+
+# ── ai assistant scratch / local notes ────────────────────────────────
+.claude/
+.cursorrules.local
+NOTES.local.md
+TODO.local.md
+
+# ── claude code worktrees / scratch (if you use the worktree workflow) ─
+.worktrees/
+
+# ── vendored .app bundles / large binaries ────────────────────────────
+# src-tauri/vendor/ holds reference apps (Ghostty.app, etc.) used during
+# development to crib UI/PTY behavior. They're 50MB+ each, license-encumbered,
+# and not needed at build time — keep them local only.
+src-tauri/vendor/
+**/*.app/
+
+# ── coverage / test artifacts ─────────────────────────────────────────
+coverage/
+*.lcov
+.nyc_output/
+
+# ── package manager lockfile cruft ────────────────────────────────────
+.pnpm-store/
+.yarn/
+.npmrc.local

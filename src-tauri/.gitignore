@@ -1,0 +1,17 @@
+# Cargo build artifacts (compiled binaries, intermediate object files).
+/target/
+
+# Tauri-generated capability schema files (auto-regenerated on every build).
+/gen/schemas/
+
+# Tauri bundle outputs (.app / .dmg / .deb / .AppImage / .msi / .exe).
+/target/release/bundle/
+/target/debug/bundle/
+
+# Bundler scratch dirs (created during `tauri build`).
+/.bundle/
+/WixTools/
+
+# macOS code-sign artifacts (entitlements scratch, notarization receipts).
+*.entitlements.local
+notarytool-history.plist

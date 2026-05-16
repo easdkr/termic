@@ -1,0 +1,227 @@
+// Appearance — editor + terminal fonts (separate), font sizes, ligatures.
+// Mirrors Termic's split: "Mono Font" governs the editor; "Terminal Font"
+// governs xterm. Sizes are independent.
+
+import { usePrefs, MONO_FONT_OPTIONS, availableMonoFonts, availableMonoFontsAsync } from "@/store/prefs";
+import { useEffect, useState } from "react";
+import { cn } from "@/lib/utils";
+
+export function AppearanceSection() {
+  const editorFontId    = usePrefs(s => s.editorFontId);
+  const setEditorFontId = usePrefs(s => s.setEditorFontId);
+  const terminalFontId  = usePrefs(s => s.terminalFontId);
+  const setTerminalFontId = usePrefs(s => s.setTerminalFontId);
+  const terminalFontSize = usePrefs(s => s.terminalFontSize);
+  const setTerminalFontSize = usePrefs(s => s.setTerminalFontSize);
+  const terminalFontWeight = usePrefs(s => s.terminalFontWeight);
+  const setTerminalFontWeight = usePrefs(s => s.setTerminalFontWeight);
+  const editorFontSize = usePrefs(s => s.editorFontSize);
+  const setEditorFontSize = usePrefs(s => s.setEditorFontSize);
+  const codeLigatures = usePrefs(s => s.codeLigatures);
+  const setCodeLigatures = usePrefs(s => s.setCodeLigatures);
+
+  // Start with the curated subset so the picker is usable instantly, then
+  // upgrade to the full system list when font-kit comes back (~50–200ms).
+  const [fonts, setFonts] = useState(() => availableMonoFonts());
+  useEffect(() => { availableMonoFontsAsync().then(setFonts).catch(() => {}); }, []);
+
+  return (
+    <div className="flex flex-col gap-8">
+      <h1 className="text-[20px] font-medium">Appearance</h1>
+
+      <Field
+        label="Editor font"
+        hint="Font for the code editor and diff viewer."
+        control={
+          <FontSelect value={editorFontId} onChange={setEditorFontId} fonts={fonts} />
+        }
+      />
+
+      <CodePreview fontStack={stackById(editorFontId)} size={editorFontSize} />
+
+      <Field
+        label="Editor font size"
+        hint={`${editorFontSize}px`}
+        control={
+          <SizeSlider value={editorFontSize} onChange={setEditorFontSize} min={10} max={20} />
+        }
+      />
+
+      <Toggle
+        label="Code ligatures"
+        hint="Render font ligatures like `=>`, `!==`, `>=` as combined glyphs in the editor."
+        value={codeLigatures}
+        onChange={setCodeLigatures}
+      />
+
+      <Divider />
+
+      <Field
+        label="Terminal font"
+        hint="Font for all xterm terminals (main + scratch shell)."
+        control={
+          <FontSelect value={terminalFontId} onChange={setTerminalFontId} fonts={fonts} />
+        }
+      />
+
+      <Field
+        label="Terminal font size"
+        hint={`${terminalFontSize}px`}
+        control={
+          <SizeSlider value={terminalFontSize} onChange={setTerminalFontSize} min={10} max={20} />
+        }
+      />
+
+      <Field
+        label="Terminal font weight"
+        hint={`${terminalFontWeight} — WKWebView renders lighter than native Terminal.app at the same weight. Bump to 500 to match.`}
+        control={
+          <WeightPicker value={terminalFontWeight} onChange={setTerminalFontWeight} />
+        }
+      />
+
+      <div className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[var(--color-fg)]"
+           style={{ fontFamily: stackById(terminalFontId), fontSize: `${terminalFontSize}px`, fontWeight: terminalFontWeight, lineHeight: 1.4 }}>
+        <span className="text-[#7cd57e]">~/project</span> <span className="text-[#d97757]">main</span> <span className="text-[#f0b13a]">±3</span><br/>
+        <span className="text-[#d97757]">{"〉"}</span> npm test <span className="text-[#7cd57e]">✓</span><br/>
+        <span className="text-[#a7f3a0]">└─▶ All tests passed!</span>
+      </div>
+    </div>
+  );
+}
+
+function stackById(id: string) {
+  return (MONO_FONT_OPTIONS.find(o => o.id === id) || MONO_FONT_OPTIONS[0]).stack;
+}
+
+function Field({ label, hint, control }: { label: string; hint?: string; control: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-6">
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-medium">{label}</div>
+        {hint && <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">{hint}</div>}
+      </div>
+      <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
+function FontSelect({ value, onChange, fonts }: {
+  value: string;
+  onChange: (id: string) => void;
+  fonts: typeof MONO_FONT_OPTIONS;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
+    >
+      {fonts.map(f => (
+        <option key={f.id} value={f.id} style={{ fontFamily: f.stack }}>{f.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function SizeSlider({ value, onChange, min, max }: { value: number; onChange: (n: number) => void; min: number; max: number }) {
+  return (
+    <input
+      type="range" min={min} max={max} step={1} value={value}
+      onChange={(e) => onChange(Number(e.target.value))}
+      className="w-[180px] accent-[var(--color-accent)]"
+    />
+  );
+}
+
+const WEIGHTS = [
+  { w: 300, label: "Light" },
+  { w: 400, label: "Regular" },
+  { w: 500, label: "Medium" },
+  { w: 600, label: "Semibold" },
+  { w: 700, label: "Bold" },
+];
+
+function WeightPicker({ value, onChange }: { value: number; onChange: (w: number) => void }) {
+  return (
+    <div className="inline-flex items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[3px]">
+      {WEIGHTS.map(({ w, label }) => (
+        <button
+          key={w} type="button" onClick={() => onChange(w)}
+          className={cn(
+            "h-7 rounded-[5px] px-2.5 text-[12px] transition-colors",
+            value === w
+              ? "bg-[var(--color-accent)] text-white"
+              : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
+          )}
+          // Render each pill's label in its own weight — gives a live preview
+          // so the user can compare without applying.
+          style={{ fontWeight: w }}
+        >{label}</button>
+      ))}
+    </div>
+  );
+}
+
+function Toggle({ label, hint, value, onChange }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="flex items-start justify-between gap-6">
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-medium">{label}</div>
+        {hint && <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">{hint}</div>}
+      </div>
+      {/* 100% inline-style geometry — Tailwind size utilities were getting
+          shrunk by something (still investigating: possibly user-agent button
+          width or some flex parent). Hard-coding sidesteps the question. */}
+      <button
+        role="switch" aria-checked={value} onClick={() => onChange(!value)}
+        style={{
+          position: "relative",
+          width: 36, height: 20,
+          flexShrink: 0,
+          borderRadius: 999,
+          padding: 0, border: 0,
+          background: value ? "var(--color-accent)" : "var(--color-bg-3)",
+          transition: "background-color 150ms",
+          cursor: "pointer",
+          display: "inline-block",
+          verticalAlign: "middle",
+        }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            top: 2,
+            left: value ? 18 : 2,
+            width: 16, height: 16,
+            borderRadius: 999,
+            background: "#ffffff",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
+            transition: "left 150ms",
+          }}
+        />
+      </button>
+    </div>
+  );
+}
+
+function Divider() { return <div className="h-px bg-[var(--color-border-soft)]" />; }
+
+function CodePreview({ fontStack, size }: { fontStack: string; size: number }) {
+  // Plain pre with explicit newlines via a template literal. JSX whitespace
+  // between sibling spans is collapsed, so the previous per-token coloring
+  // produced one giant line and a horizontal scrollbar. Keeping it monochrome
+  // (and wrapping) avoids that — the editor itself shows the real syntax
+  // highlighting; this is just a font preview.
+  const sample = `// Fetch user data
+async function getUser(id: number) {
+  const response = await fetch(\`/api/users/\${id}\`);
+  return response.json();
+}`;
+  return (
+    <div className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-4 overflow-hidden"
+         style={{ fontFamily: fontStack, fontSize: `${size}px`, lineHeight: 1.5 }}>
+      <pre className="whitespace-pre-wrap text-[var(--color-fg)]">{sample}</pre>
+    </div>
+  );
+}
