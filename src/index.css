@@ -98,40 +98,6 @@
     color-scheme: light;
   }
 
-  /* Monokai Pro — the modern variant of Wimer Hazenberg's classic.
-     Pro shifted the harsh fluorescents of the original (#272822 /
-     #f92672 / #fd971f) to softer, pastel-ish values: #2D2A2E bg,
-     #FCFCFA fg, salmon pink #FF6188 + warm orange #FC9867 + gold
-     #FFD866 + lime #A9DC76 + sky #78DCE8 + lavender #AB9DF2.
-     That's what most Monokai screenshots show today, and it's
-     friendlier for UI chrome than the original's neon. Chrome
-     accent uses the orange (#FC9867); terminal keeps salmon pink
-     for the cursor + ANSI red so syntax-highlighted code feels
-     unmistakably Monokai. */
-  html.monokai {
-    --color-bg:          #2d2a2e;
-    --color-bg-1:        #353035;
-    --color-bg-2:        #3d383d;
-    --color-bg-3:        #463f46;
-    --color-fg:          #fcfcfa;
-    --color-fg-dim:      #b4adb4;
-    --color-fg-faint:    #727072;   /* canonical Monokai Pro comment color */
-    --color-border:      #5b575b;
-    --color-border-soft: #403b40;
-    --color-hover:       rgba(252, 252, 250, 0.05);
-    /* Sel + active-bg use a neutral light tint, NOT orange.
-       Sublime's Monokai Pro keeps active sidebar rows visually quiet
-       (a slight gray lift) and reserves the orange for accents that
-       actually need to pop: cursor, focus ring, brand color, etc.
-       Full-row orange-soft tinting reads as maroon over the warm-dark
-       bg - which is what the user saw. Neutral light wash + orange
-       accent-only on small surfaces gives the right balance. */
-    --color-sel:         rgba(252, 252, 250, 0.08);
-    --color-accent:      #fc9867;
-    --color-accent-soft: rgba(252, 252, 250, 0.08);
-    color-scheme: dark;
-  }
-
   /* Cobalt — classic Wes Bos / iTerm "Cobalt 2" palette. Deep navy
      surfaces with a signature yellow accent (#ffc600). Reads as the
      bluest theme on offer; the yellow accent is the iconic part of

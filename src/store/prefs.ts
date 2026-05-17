@@ -17,10 +17,19 @@ const LS_SETTLED_HIGHLIGHT = "settledHighlight";
 const LS_DEFAULT_SANDBOX = "globalDefaultSandbox";
 const LS_TERMINAL_WEIGHT = "terminalFontWeight";
 
-export type ThemeMode = "auto" | "light" | "dark" | "monokai" | "solarized" | "cobalt" | "matrix";
+export type ThemeMode = "auto" | "light" | "dark" | "solarized" | "cobalt" | "matrix";
 /** What `applyTheme` resolves to: a concrete palette name. `auto` is
  *  never returned; it gets mapped to light/dark based on OS preference. */
-export type ResolvedTheme = "light" | "dark" | "monokai" | "solarized" | "cobalt" | "matrix";
+export type ResolvedTheme = "light" | "dark" | "solarized" | "cobalt" | "matrix";
+
+const VALID_MODES: ReadonlyArray<ThemeMode> = ["auto", "light", "dark", "solarized", "cobalt", "matrix"];
+/** Defensive parse: localStorage may hold a theme id that's been
+ *  removed in a later version. Fall back to "dark" instead of letting
+ *  the unknown string flow through and silently land on the @theme
+ *  default. */
+function parseThemeMode(raw: string): ThemeMode {
+  return (VALID_MODES as readonly string[]).includes(raw) ? (raw as ThemeMode) : "dark";
+}
 
 /** xterm theme objects keyed by resolved palette. Each must define enough
  *  of xterm's ITheme that the terminal looks at home in the surrounding
@@ -48,23 +57,6 @@ export const TERMINAL_THEMES: Record<ResolvedTheme, Record<string, string>> = {
     blue: "#2c5fb3", magenta: "#7a3aa5", cyan: "#1c7c8e", white: "#3f3d3a",
     brightBlack: "#55534f", brightRed: "#d9453d", brightGreen: "#52a352", brightYellow: "#b88a26",
     brightBlue: "#3a7bd9", brightMagenta: "#9358c2", brightCyan: "#1f97ad", brightWhite: "#1c1b1a",
-  },
-  monokai: {
-    // Monokai Pro (the modern, pastel-ish refresh of the classic).
-    // ANSI maps to Pro's syntax palette - salmon pink for keywords,
-    // warm orange for functions, gold yellow for strings, lime for
-    // regex/special, sky cyan for types, lavender for constants.
-    // Same colors users see in current Sublime/VS Code Monokai Pro
-    // themes; familiar territory for syntax-highlighted shell output.
-    background: "#2d2a2e",
-    foreground: "#fcfcfa",
-    cursor: "#ff6188",                          // pink - canonical Monokai cursor
-    cursorAccent: "#2d2a2e",
-    selectionBackground: "rgba(91,87,91,0.85)", // #5b575b @ 85%
-    black:   "#403e41", red:     "#ff6188", green:   "#a9dc76", yellow:  "#ffd866",
-    blue:    "#78dce8", magenta: "#ab9df2", cyan:    "#78dce8", white:   "#fcfcfa",
-    brightBlack:   "#727072", brightRed:     "#ff7a9c", brightGreen:   "#bce088", brightYellow:  "#ffe093",
-    brightBlue:    "#92e3ec", brightMagenta: "#bcb1f5", brightCyan:    "#92e3ec", brightWhite:   "#ffffff",
   },
   solarized: {
     // Solarized Dark canonical ANSI mapping (Ethan Schoonover).
@@ -339,7 +331,7 @@ const initialTerminalSize = lsGetNum(LS_TERMINAL_SIZE, 13);
 const initialTerminalWeight = lsGetNum(LS_TERMINAL_WEIGHT, 400);
 const initialEditorSize   = lsGetNum(LS_EDITOR_SIZE, 13);
 const initialLigatures    = lsGetBool(LS_LIGATURES, true);
-const initialTheme        = (lsGet(LS_THEME, "dark") as ThemeMode);
+const initialTheme        = parseThemeMode(lsGet(LS_THEME, "dark"));
 const initialYolo         = lsGetBool(LS_YOLO, false);
 const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
 const initialSettledHighlight = lsGetBool(LS_SETTLED_HIGHLIGHT, true);
@@ -445,7 +437,6 @@ export function applyTheme(mode: ThemeMode) {
   const html = document.documentElement;
   html.classList.toggle("light",     resolved === "light");
   html.classList.toggle("dark",      resolved === "dark");
-  html.classList.toggle("monokai",   resolved === "monokai");
   html.classList.toggle("solarized", resolved === "solarized");
   html.classList.toggle("cobalt",    resolved === "cobalt");
   html.classList.toggle("matrix",    resolved === "matrix");
