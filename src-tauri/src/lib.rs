@@ -379,15 +379,24 @@ fn pty_spawn(
     {
         Some(ws) => match sandbox::provision(&ws) {
             Ok(bundle) => {
+                let port = bundle.proxy.as_ref().map(|p| p.port).unwrap_or(0);
+                dlog(&format!(
+                    "[pty_spawn] sandbox=ON ws={} cli={} proxy_port={} profile={}",
+                    ws.id, ws.cli, port, bundle.profile_path.display(),
+                ));
                 let (c, a) = sandbox::wrap_command(&bundle, &args.cmd, &args.args);
+                dlog(&format!("[pty_spawn] wrapped: {c} {a:?}"));
                 (c, a, Some(bundle))
             }
             Err(e) => {
-                eprintln!("[pty_spawn] sandbox provision failed, spawning unsandboxed: {e}");
+                dlog(&format!("[pty_spawn] sandbox provision failed, spawning unsandboxed: {e}"));
                 (args.cmd.clone(), args.args.clone(), None)
             }
         },
-        None => (args.cmd.clone(), args.args.clone(), None),
+        None => {
+            dlog(&format!("[pty_spawn] sandbox=OFF cmd={} args={:?}", args.cmd, args.args));
+            (args.cmd.clone(), args.args.clone(), None)
+        },
     };
 
     let mut cmd = CommandBuilder::new(&effective_cmd);
@@ -407,7 +416,12 @@ fn pty_spawn(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
+        let s = e.to_string();
+        dlog(&format!("[pty_spawn] spawn_command FAILED: {s}"));
+        s
+    })?;
+    dlog(&format!("[pty_spawn] spawn_command OK pid={:?}", child.process_id()));
     let child_pid = child.process_id();
     drop(pair.slave);
 
@@ -1760,12 +1774,20 @@ fn workspace_stop_script(id: String, kind: String) -> Result<(), String> {
 // ───────────────────────────── notify ─────────────────────────────
 
 #[tauri::command]
-fn log_line(msg: String) {
+fn log_line(msg: String) { dlog(&msg); }
+
+/// Rust-side log append. Mirror of `log_line` IPC but callable from
+/// anywhere in the crate (proxy.rs / sandbox.rs / spawn paths).
+/// Persistent file lets us debug post-mortem; eprintln stderr only
+/// shows up if the user redirected the dev process to a logfile.
+pub fn dlog(msg: &str) {
     use std::io::Write;
     let p = std::env::temp_dir().join("termic-debug.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().format("%H:%M:%S%.3f"), msg);
     }
+    // Also echo to stderr so `npm run tauri:dev` foreground shows it.
+    eprintln!("{msg}");
 }
 
 #[tauri::command]

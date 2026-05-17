@@ -153,7 +153,7 @@ export function AuxTerminal({ wsPath, active }: { wsPath: string; active: boolea
         // Overlay sits on top of the dead xterm. Click-through is disabled
         // (own pointer events) so the user can't accidentally interact with
         // the corpse below.
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)]/85 backdrop-blur-[1px]">
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)]/85">
           <div className="text-[13px] text-[var(--color-fg-dim)]">Shell exited.</div>
           <button
             onClick={() => setGen(g => g + 1)}

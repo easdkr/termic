@@ -418,10 +418,15 @@ export function TerminalPane({ ws, tab, active }: Props) {
           type="button"
           onClick={() => useUI.getState().openSandbox(ws.id)}
           className={cn(
+            // Bg MUST be fully opaque - the chip sits on top of the
+            // xterm canvas, and any alpha lets the terminal's last
+            // rendered glyphs bleed through under the footer text,
+            // producing what looks like doubled characters
+            // ("02extrahosts" instead of "0 extra hosts").
             "flex shrink-0 items-center gap-1.5 border-t px-3 py-1 text-left text-[11.5px] hover:text-[var(--color-fg)]",
             sandboxWarning
-              ? "border-[var(--color-warn)]/40 bg-[var(--color-warn)]/15 text-[var(--color-fg)] hover:bg-[var(--color-warn)]/20"
-              : "border-[var(--color-border-soft)] bg-[var(--color-bg-1)]/60 text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-2)]",
+              ? "border-[var(--color-warn)]/40 bg-[var(--color-warn)] text-[var(--color-fg)] hover:brightness-110"
+              : "border-[var(--color-border-soft)] bg-[var(--color-bg-1)] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-2)]",
           )}
           title={sandboxWarning ?? "Edit sandbox for this workspace"}
         >
@@ -454,7 +459,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
         // so the user can still scroll through whatever the agent printed
         // before it died — we just block input + offer a restart. `gen++`
         // tears down the spawn effect and re-runs it with a fresh PTY.
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)]/85 backdrop-blur-[1px]">
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)]/85">
           <div className="text-[13px] text-[var(--color-fg-dim)]">{tab.cli} exited.</div>
           <button
             onClick={() => { setExited(false); setGen(g => g + 1); }}

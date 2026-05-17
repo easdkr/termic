@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { settingsLoad, agentsSave, agentsDefaults } from "@/lib/ipc";
+import { useUI } from "@/store/ui";
 import type { Agent } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -56,8 +57,13 @@ export function AgentsSection() {
 
   /** Reset every built-in to ship defaults; preserves custom agents the
    *  user added. */
-  function resetAllBuiltins() {
-    if (!confirm("Reset all built-in agents (claude, gemini, codex) to ship defaults?\n\nCustom agents you added are kept.")) return;
+  async function resetAllBuiltins() {
+    const ok = await useUI.getState().askConfirm({
+      title: "Reset built-in agents to defaults?",
+      message: "Resets claude, gemini, codex to their ship-default commands. Custom agents you added are kept.",
+      confirmLabel: "Reset built-ins",
+    });
+    if (!ok) return;
     const next = agents.map(a => {
       const d = defaults.find(d => d.id === a.id);
       return d ? { ...d } : a;

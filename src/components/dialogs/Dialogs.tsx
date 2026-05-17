@@ -33,7 +33,7 @@ export function Dialogs() {
           (archive workspace, etc.). Click-blocks the whole window so users
           don't fire the action twice mid-wait. */}
       {busyMessage && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55">
           <div className="flex items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-1)] px-4 py-3 text-[13px] shadow-2xl">
             <Loader2 className="h-4 w-4 animate-spin text-[var(--color-accent)]" />
             <span>{busyMessage}</span>

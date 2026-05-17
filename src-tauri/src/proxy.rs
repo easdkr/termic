@@ -33,6 +33,7 @@
 
 use anyhow::{anyhow, Result};
 use regex::Regex;
+use crate::dlog;
 use std::io::{Read, Write, ErrorKind};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,6 +82,7 @@ pub fn start(allowed_patterns: Vec<String>) -> Result<ProxyHandle> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
+    dlog(&format!("[proxy] listening on 127.0.0.1:{port} ({} patterns)", regexes.len()));
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
@@ -201,12 +203,37 @@ fn handle_connect(mut client: TcpStream, target: &str, regexes: &[Regex]) -> Res
     };
 
     if !host_allowed(host, regexes) {
-        // 403 matches tinyproxy's FilterDefaultDeny behavior so the
-        // rest of the sandbox UI (recent-denies panel, frontend
-        // observation) sees the same status code we used to emit.
-        write_status(&mut client, 403, "Forbidden")?;
+        dlog(&format!("[proxy] CONNECT {host}:{port} → 403 (not on allowlist)"));
+        // 403 with a self-identifying reason phrase + body + custom
+        // header so the AGENT sees that THIS proxy (not the upstream
+        // server, not a corporate gateway) rejected the request. The
+        // reason phrase is what curl/most clients echo on errors;
+        // the body + X-Termic-Sandbox header are for fetch()-style
+        // clients that parse the response. The whole stanza is the
+        // "hint" — a sandboxed claude/codex/gemini can pattern-match
+        // "Blocked by Termic sandbox" and tell the user what to do.
+        let body = format!(
+            "Blocked by Termic sandbox.\n\n\
+             Host: {host}\n\
+             This workspace's allowed-hosts list does NOT permit traffic to this host.\n\n\
+             To unblock: open the Sandbox dialog (shield icon on the workspace) and add\n\
+             this host (wildcards OK, e.g. `*.{host}`) to \"Add allowed hosts\".\n\
+             Or disable the sandbox entirely if that's what you want.\n"
+        );
+        let resp = format!(
+            "HTTP/1.1 403 Blocked by Termic sandbox\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: {}\r\n\
+             X-Termic-Sandbox: blocked-by-allowlist\r\n\
+             X-Termic-Sandbox-Host: {host}\r\n\
+             Connection: close\r\n\
+             \r\n{body}",
+            body.len(),
+        );
+        client.write_all(resp.as_bytes())?;
         return Ok(());
     }
+    dlog(&format!("[proxy] CONNECT {host}:{port} → allowed, resolving"));
 
     // Connect to the actual upstream. ToSocketAddrs handles DNS in
     // one call; we don't constrain IPv6 vs IPv4 - whichever resolves.
@@ -223,10 +250,12 @@ fn handle_connect(mut client: TcpStream, target: &str, regexes: &[Regex]) -> Res
     let upstream = match TcpStream::connect_timeout(&upstream, Duration::from_millis(CONNECT_UPSTREAM_TIMEOUT_MS)) {
         Ok(s) => s,
         Err(e) => {
+            dlog(&format!("[proxy] CONNECT {host}:{port} → 502 (upstream connect failed: {e})"));
             write_status(&mut client, 502, "Bad Gateway")?;
             return Err(anyhow!("connect upstream {host}:{port}: {e}"));
         }
     };
+    dlog(&format!("[proxy] CONNECT {host}:{port} → 200 (tunneling)"));
 
     // CONNECT 2xx MUST NOT carry Content-Length / Transfer-Encoding
     // (RFC 9110 §9.3.6). And `Connection: close` here makes curl
@@ -270,7 +299,29 @@ fn handle_plain_http(
     };
 
     if !host_allowed(host, regexes) {
-        write_status(&mut client, 403, "Forbidden")?;
+        // Same self-identifying 403 as the CONNECT path so plain-HTTP
+        // clients (older code, agents that haven't moved to HTTPS for
+        // a given target) see the Termic-specific signal too.
+        dlog(&format!("[proxy] HTTP {method} {host}:{port} → 403 (not on allowlist)"));
+        let body = format!(
+            "Blocked by Termic sandbox.\n\n\
+             Host: {host}\n\
+             This workspace's allowed-hosts list does NOT permit traffic to this host.\n\n\
+             To unblock: open the Sandbox dialog (shield icon on the workspace) and add\n\
+             this host (wildcards OK, e.g. `*.{host}`) to \"Add allowed hosts\".\n\
+             Or disable the sandbox entirely if that's what you want.\n"
+        );
+        let resp = format!(
+            "HTTP/1.1 403 Blocked by Termic sandbox\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: {}\r\n\
+             X-Termic-Sandbox: blocked-by-allowlist\r\n\
+             X-Termic-Sandbox-Host: {host}\r\n\
+             Connection: close\r\n\
+             \r\n{body}",
+            body.len(),
+        );
+        client.write_all(resp.as_bytes())?;
         return Ok(());
     }
 

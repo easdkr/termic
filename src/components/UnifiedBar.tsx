@@ -193,21 +193,32 @@ export function UnifiedBar() {
               <Tip content="Bring this worktree's diff into the project's main checkout" side="bottom">
                 <Button size="sm" variant="ghost" className="gap-1.5"
                   onClick={async () => {
-                    if (!confirm(
-                      `Send "${ws.name}" diff into the main checkout?\n\n` +
-                      `This applies all tracked changes (committed + staged + unstaged) ` +
-                      `and copies untracked files into ${proj.root_path}.\n\n` +
-                      `The main checkout must be clean — commit or stash there first.`,
-                    )) return;
+                    const ok = await useUI.getState().askConfirm({
+                      title: `Send "${ws.name}" to main?`,
+                      message:
+                        `Applies all tracked changes (committed + staged + unstaged) and copies untracked files into ${proj.root_path}. ` +
+                        `The main checkout must be clean — commit or stash there first.`,
+                      confirmLabel: "Send to main",
+                    });
+                    if (!ok) return;
                     try {
                       const r = await workspaceSendDiffToMain(ws.id);
-                      alert(
-                        `Sent to main checkout.\n\n` +
-                        `Tracked file diffs applied: ${r.tracked_files}\n` +
-                        `Untracked files copied: ${r.untracked_files}`,
-                      );
+                      await useUI.getState().askConfirm({
+                        title: "Sent to main checkout",
+                        message:
+                          `Tracked file diffs applied: ${r.tracked_files}\n` +
+                          `Untracked files copied: ${r.untracked_files}`,
+                        confirmLabel: "OK",
+                        cancelLabel: "",
+                      });
                     } catch (e) {
-                      alert(`Send to main failed:\n\n${e}`);
+                      await useUI.getState().askConfirm({
+                        title: "Send to main failed",
+                        message: String(e),
+                        confirmLabel: "OK",
+                        cancelLabel: "",
+                        destructive: true,
+                      });
                     }
                   }}>
                   <ArrowUpToLine className="h-4 w-4" />

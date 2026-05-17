@@ -91,21 +91,22 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     // Worktrees: get `git worktree remove` + `rm -rf` on disk.
     // Repo-root workspaces: just unregistered (the real repo stays put).
     // The user's actual git repo at root_path is NEVER touched.
-    const lines = [
-      `Remove project "${proj.name}"?`,
-      "",
+    const parts: string[] = [];
+    parts.push(
       wsCount === 0
         ? "No workspaces to remove."
-        : `This will archive ${wsCount} workspace${wsCount === 1 ? "" : "s"}:`,
-    ];
-    if (wtCount > 0) {
-      lines.push(`  • ${wtCount} git worktree${wtCount === 1 ? "" : "s"} will be removed from disk (rm -rf).`);
-    }
-    if (wsCount - wtCount > 0) {
-      lines.push(`  • ${wsCount - wtCount} repo-root workspace${wsCount - wtCount === 1 ? "" : "s"} will be unregistered.`);
-    }
-    lines.push("", `Your repo at ${proj.root_path} is NOT touched.`, "", "Cannot be undone.");
-    if (!confirm(lines.join("\n"))) return;
+        : `Archives ${wsCount} workspace${wsCount === 1 ? "" : "s"}.`,
+    );
+    if (wtCount > 0) parts.push(`${wtCount} git worktree${wtCount === 1 ? "" : "s"} removed from disk (rm -rf).`);
+    if (wsCount - wtCount > 0) parts.push(`${wsCount - wtCount} repo-root entr${wsCount - wtCount === 1 ? "y" : "ies"} unregistered.`);
+    parts.push(`Your repo at ${proj.root_path} is NOT touched. Cannot be undone.`);
+    const ok = await useUI.getState().askConfirm({
+      title: `Remove project "${proj.name}"?`,
+      message: parts.join(" "),
+      confirmLabel: "Remove project",
+      destructive: true,
+    });
+    if (!ok) return;
     const { setBusy } = useUI.getState();
     setBusy(`Removing "${proj.name}" and ${wsCount} workspace${wsCount === 1 ? "" : "s"}…`);
     try {

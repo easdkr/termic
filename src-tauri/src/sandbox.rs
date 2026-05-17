@@ -42,6 +42,7 @@ use std::process::Command;
 
 use crate::Workspace;
 use crate::proxy;
+use crate::dlog;
 
 /// One sandbox instance, scoped to a single PTY spawn. The proxy thread
 /// is owned here so dropping the bundle shuts it down.
@@ -132,13 +133,25 @@ fn builtin_rw_paths(home: &str, workspace_path: &str) -> Vec<String> {
         // pip build artifacts).
         "/private/tmp".to_string(),
         "/private/var/folders".to_string(),
-        // Agent state dirs.
+        // Agent state dirs - legacy single-dir convention.
         format!("{home}/.claude"),
         format!("{home}/.gemini"),
         format!("{home}/.codex"),
+        // Agent state dirs - XDG-style (what the modern CLIs actually
+        // write to for sessions, history, telemetry, cache). codex in
+        // particular writes session logs to ~/.config/codex and exits
+        // with EPERM if it can't - this was the "Operation not
+        // permitted (os error 1)" crash. Each CLI gets all three XDG
+        // bases so we don't have to chase per-version variants.
         format!("{home}/.config/claude"),
+        format!("{home}/.config/codex"),
         format!("{home}/.config/gemini"),
         format!("{home}/.local/share/claude"),
+        format!("{home}/.local/share/codex"),
+        format!("{home}/.local/share/gemini"),
+        format!("{home}/.local/state/claude"),
+        format!("{home}/.local/state/codex"),
+        format!("{home}/.local/state/gemini"),
         // Package manager caches - npm/pip/cargo all write here on
         // first install. Without these even a `git clone && npm i`
         // breaks in a sandboxed workspace.
@@ -276,10 +289,15 @@ pub fn provision(workspace: &Workspace) -> Result<SandboxBundle> {
     // gets its patterns from memory below. Best-effort write.
     let _ = fs::write(&filter_path, render_filter(workspace));
 
-    let proxy = match proxy::start(host_patterns(workspace)) {
-        Ok(p) => Some(p),
+    let patterns = host_patterns(workspace);
+    dlog(&format!("[sandbox/{}] provisioning, {} host patterns", workspace.id, patterns.len()));
+    let proxy = match proxy::start(patterns) {
+        Ok(p) => {
+            dlog(&format!("[sandbox/{}] proxy up on port {}", workspace.id, p.port));
+            Some(p)
+        }
         Err(e) => {
-            eprintln!("[sandbox/{}] proxy failed to start: {e}", workspace.id);
+            dlog(&format!("[sandbox/{}] proxy failed to start: {e}", workspace.id));
             None
         }
     };
@@ -288,6 +306,7 @@ pub fn provision(workspace: &Workspace) -> Result<SandboxBundle> {
     let profile = render_profile(workspace, port)?;
     fs::write(&profile_path, &profile)
         .with_context(|| format!("write {}", profile_path.display()))?;
+    dlog(&format!("[sandbox/{}] profile written: {}", workspace.id, profile_path.display()));
 
     Ok(SandboxBundle { profile_path, filter_path, proxy })
 }
@@ -305,6 +324,16 @@ pub fn wrap_command(
     new_args.push("-f".into());
     new_args.push(bundle.profile_path.to_string_lossy().into_owned());
     new_args.push("env".into());
+    // Self-identifying env so agents (and tools they spawn) can map
+    // EPERM filesystem errors and 403 X-Termic-Sandbox responses back
+    // to "I'm in a Termic cage" instead of guessing macOS TCC. Most
+    // useful when the user pastes their workspace's CLAUDE.md /
+    // AGENTS.md a note like:
+    //   "If $TERMIC_SANDBOX=1 and you hit EPERM on a write, the path
+    //    isn't on the workspace's writable list. Tell the user to
+    //    add it via the Sandbox dialog or disable the cage."
+    new_args.push("TERMIC_SANDBOX=1".into());
+    new_args.push("TERMIC_SANDBOX_HELP=Filesystem EPERM on paths outside the workspace = blocked by Termic sandbox, not by macOS TCC. Network 403 with header `X-Termic-Sandbox: blocked-by-allowlist` = same cause. Fix: open the Sandbox dialog (shield icon on the workspace) and add the path/host, or disable the cage.".into());
     if let Some(proxy) = &bundle.proxy {
         let url = format!("http://127.0.0.1:{}", proxy.port);
         new_args.push(format!("http_proxy={url}"));
@@ -313,9 +342,13 @@ pub fn wrap_command(
         new_args.push(format!("HTTPS_PROXY={url}"));
         new_args.push("no_proxy=localhost,127.0.0.1,::1".into());
         new_args.push("NO_PROXY=localhost,127.0.0.1,::1".into());
-        // Node specifically: pre-23 versions ignore http_proxy unless
-        // told. dpf_agents documents this same flag.
-        new_args.push("NODE_OPTIONS=--use-env-proxy".into());
+        // Node `--use-env-proxy` only exists in v24+. Setting it via
+        // NODE_OPTIONS on Node 20/22 (LTS) crashes the agent CLI at
+        // launch with "node: bad option" - exactly the kind of EPERM-
+        // shaped spawn failure we were chasing. If/when v24 LTS lands
+        // and is the norm, we can re-add it; until then routing of
+        // node-internal fetch() traffic is the agent CLI's problem
+        // (they typically use the http_proxy env above via undici).
     }
     new_args.push(original_cmd.into());
     new_args.extend(original_args.iter().cloned());
@@ -496,12 +529,15 @@ const SBPL_HEADER: &str = r#";; termic sandbox profile - generated; do not edit.
 (allow file-read*)
 (allow file-read-metadata)
 
-;; macOS character devices the runtime expects to write.
-(allow file-write-data
-  (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))
-(allow file-write-data
-  (require-all (path "/dev/dtracehelper") (vnode-type CHARACTER-DEVICE)))
-(allow file-ioctl (literal "/dev/dtracehelper"))
+;; Character devices the runtime expects to read/write/ioctl on. The
+;; permissive vnode-type rule covers /dev/null, /dev/tty, the PTY
+;; pair (/dev/ttys0NN, /dev/ptmx), /dev/random, /dev/urandom, etc.
+;; Without file-ioctl on character devices, Node's tty.setRawMode()
+;; throws EPERM at agent startup ("setRawMode EPERM" from
+;; node:tty:81) and every interactive Node CLI (gemini, claude in
+;; raw mode, etc.) fails to launch.
+(allow file-write-data (vnode-type CHARACTER-DEVICE))
+(allow file-ioctl      (vnode-type CHARACTER-DEVICE))
 "#;
 
 /// Resolve symlinks so the SBPL rules match what the kernel sees.

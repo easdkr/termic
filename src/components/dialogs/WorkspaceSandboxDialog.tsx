@@ -99,13 +99,13 @@ export function WorkspaceSandboxDialog() {
     // frontend (the Rust side will tell us when the IPC returns),
     // so the dialog text is generic. The user is explicitly asking
     // for this; soft-warning is enough.
-    const ok = window.confirm(
-      `Save sandbox changes for "${ws.name}"?\n\n` +
-      `Any agent running in this workspace will be terminated and will ` +
-      `need to be restarted (click "Restart" in the terminal overlay). ` +
-      `This is by design - the running process holds the OLD sandbox ` +
-      `profile until it's replaced.`,
-    );
+    const ok = await useUI.getState().askConfirm({
+      title: `Save sandbox changes for "${ws.name}"?`,
+      message:
+        "Any agent running in this workspace will be terminated and will need to be restarted (click \"Restart\" in the terminal overlay). " +
+        "This is by design — the running process holds the OLD sandbox profile until it's replaced.",
+      confirmLabel: "Save & restart",
+    });
     if (!ok) return;
     setBusy(true); setErr(null);
     const lines = (s: string) => s.split("\n").map(l => l.trim()).filter(Boolean);
@@ -245,7 +245,7 @@ export function WorkspaceSandboxDialog() {
           </div>
         )}
 
-        <Field label="Extra writable paths" hint="One per line. $HOME and $WORKSPACE are substituted at spawn.">
+        <Field label="Add writable paths" hint="One per line. $HOME and $WORKSPACE are substituted at spawn.">
           <BuiltInsLine>
             workspace · <Mono>~/.claude</Mono> · <Mono>~/.gemini</Mono> · <Mono>~/.codex</Mono> · <Mono>~/.npm</Mono> · <Mono>~/.cache</Mono> · <Mono>~/.cargo/registry</Mono> · <Mono>~/Library/Caches</Mono> · <Mono>/private/tmp</Mono> · TMPDIR
           </BuiltInsLine>
@@ -258,7 +258,7 @@ export function WorkspaceSandboxDialog() {
             disabled={!enabled}
           />
         </Field>
-        <Field label="Extra denied paths" hint="On top of the built-in secret deny list.">
+        <Field label="Add denied paths" hint="On top of the built-in secret deny list.">
           <BuiltInsLine>
             <Mono>~/.ssh</Mono> · <Mono>~/.aws</Mono> · <Mono>~/.gnupg</Mono> · <Mono>~/.netrc</Mono> · <Mono>~/.docker/config.json</Mono> · <Mono>~/.kube</Mono> · <Mono>~/.config/gh/hosts.yml</Mono> · macOS Keychains
           </BuiltInsLine>
@@ -271,7 +271,7 @@ export function WorkspaceSandboxDialog() {
             disabled={!enabled}
           />
         </Field>
-        <Field label="Extra allowed hosts" hint="One per line. Use * as a wildcard. Examples: *.mycompany.com, bitbucket.org">
+        <Field label="Add allowed hosts" hint="One per line. Use * as a wildcard. Examples: *.mycompany.com, bitbucket.org">
           <BuiltInsLine>
             vendor API for {ws?.cli ?? "this CLI"} · github · npmjs · pypi · crates.io · CA OCSP
           </BuiltInsLine>
