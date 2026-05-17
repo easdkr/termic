@@ -50,7 +50,7 @@
       "endpoints": [
         "https://termic.dev/updates/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_ED25519_PUBLIC_KEY_AFTER_GENERATE",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgzOTlGNEM1N0QxOUMwQ0MKUldUTXdCbDl4ZlNaZzQxa0JSZGVLMWh4L3Jtb0xkU2paaU9reGNraWxVNStDcEx5bm1OY25UWjgK",
       "windows": { "installMode": "passive" }
     }
   }
