@@ -27,7 +27,25 @@ env:
   WEBSITE_MANIFEST_PATH: public/updates/latest.json
 
 jobs:
+  # Cheap fast-fail: type-check the frontend on Ubuntu (~1 min) before
+  # spinning up the ~5-min macos-14 build. Catches the broken-import /
+  # bad-prop class of errors that bit v0.1.1, without paying for a Mac
+  # runner. Cargo errors still get caught later by `tauri build` in
+  # build-mac since cross-compiling the Rust side from Linux needs
+  # the macOS SDK; not worth the setup.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx tsc -b
+
   build-mac:
+    needs: validate
     # Apple Silicon runners produce arm64 bundles. Add a separate
     # `macos-13` (x86_64) matrix entry when we want Intel coverage.
     runs-on: macos-14

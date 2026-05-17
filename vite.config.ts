@@ -16,6 +16,6 @@ export default defineConfig({
     strictPort: true,
     host: false,
     hmr: { protocol: "ws", host: "localhost", port: 1421 },
-    watch: { ignored: ["**/src-tauri/**", "**/src-legacy/**"] },
+    watch: { ignored: ["**/src-tauri/**"] },
   },
 });
