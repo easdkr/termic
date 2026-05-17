@@ -16,10 +16,10 @@ const LS_DESKTOPNOTIF  = "desktopNotifications";
 const LS_SETTLED_HIGHLIGHT = "settledHighlight";
 const LS_TERMINAL_WEIGHT = "terminalFontWeight";
 
-export type ThemeMode = "auto" | "light" | "dark" | "espresso" | "solarized";
+export type ThemeMode = "auto" | "light" | "dark" | "espresso" | "solarized" | "cobalt";
 /** What `applyTheme` resolves to: a concrete palette name. `auto` is
  *  never returned; it gets mapped to light/dark based on OS preference. */
-export type ResolvedTheme = "light" | "dark" | "espresso" | "solarized";
+export type ResolvedTheme = "light" | "dark" | "espresso" | "solarized" | "cobalt";
 
 /** xterm theme objects keyed by resolved palette. Each must define enough
  *  of xterm's ITheme that the terminal looks at home in the surrounding
@@ -70,6 +70,19 @@ export const TERMINAL_THEMES: Record<ResolvedTheme, Record<string, string>> = {
     blue:    "#268bd2", magenta: "#d33682", cyan:    "#2aa198", white:   "#eee8d5",
     brightBlack:   "#586e75", brightRed:     "#cb4b16", brightGreen:   "#586e75", brightYellow:  "#657b83",
     brightBlue:    "#839496", brightMagenta: "#6c71c4", brightCyan:    "#93a1a1", brightWhite:   "#fdf6e3",
+  },
+  cobalt: {
+    // Wes Bos / iTerm "Cobalt 2". Deep navy + bright accents; the
+    // signature yellow cursor on dark blue is what makes it Cobalt.
+    background: "#193549",
+    foreground: "#e1efff",
+    cursor: "#ffc600",
+    cursorAccent: "#193549",
+    selectionBackground: "rgba(255,198,0,0.22)",
+    black: "#234a6a", red:     "#ff628c", green:   "#3ad900", yellow:  "#ffc600",
+    blue:  "#9effff", magenta: "#fb94ff", cyan:    "#80ffbb", white:   "#e1efff",
+    brightBlack: "#5a91b1", brightRed:     "#ff7da3", brightGreen:   "#5eea2e", brightYellow:  "#ffd54a",
+    brightBlue:  "#b3ffff", brightMagenta: "#ffaaff", brightCyan:    "#a4ffd4", brightWhite:   "#ffffff",
   },
 };
 
@@ -399,6 +412,7 @@ export function applyTheme(mode: ThemeMode) {
   html.classList.toggle("dark",      resolved === "dark");
   html.classList.toggle("espresso",  resolved === "espresso");
   html.classList.toggle("solarized", resolved === "solarized");
+  html.classList.toggle("cobalt",    resolved === "cobalt");
   // Color-scheme tells the browser to use light/dark form controls +
   // scrollbars. Espresso + Solarized both want dark widgets.
   html.style.colorScheme = resolved === "light" ? "light" : "dark";

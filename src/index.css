@@ -118,6 +118,28 @@
     color-scheme: dark;
   }
 
+  /* Cobalt — classic Wes Bos / iTerm "Cobalt 2" palette. Deep navy
+     surfaces with a signature yellow accent (#ffc600). Reads as the
+     bluest theme on offer; the yellow accent is the iconic part of
+     Cobalt's identity so we shift the brand color rather than try to
+     squeeze terracotta into a navy scheme where it'd look out of place. */
+  html.cobalt {
+    --color-bg:          #193549;
+    --color-bg-1:        #1f4662;
+    --color-bg-2:        #234a6a;
+    --color-bg-3:        #2c5278;
+    --color-fg:          #e1efff;
+    --color-fg-dim:      #aacdee;
+    --color-fg-faint:    #6a93b7;
+    --color-border:      #2c5278;
+    --color-border-soft: #1f4662;
+    --color-hover:       rgba(255, 246, 187, 0.06);
+    --color-sel:         rgba(255, 198, 0, 0.22);
+    --color-accent:      #ffc600;   /* cobalt yellow */
+    --color-accent-soft: rgba(255, 198, 0, 0.22);
+    color-scheme: dark;
+  }
+
   /* Solarized Dark — Ethan Schoonover's palette (base03/02/01/00 + base0/1).
      We shift the brand accent to solarized orange (#cb4b16) because the
      terracotta clashes with the cool teal of base03; Solarized has its
