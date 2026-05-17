@@ -4,6 +4,89 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
+# ─── setup ────────────────────────────────────────────────────────────
+
+# One-shot dev environment bootstrap. Installs every system prereq
+# Termic needs (homebrew, Rust toolchain, Zig 0.15.x, Node), runs
+# `npm install`, and pre-fetches the Rust deps so the first `just dev`
+# isn't a surprise 5-minute compile. Idempotent — re-runnable any time.
+#
+# Zig is the load-bearing one: libghostty-vt-sys's build.rs invokes
+# `zig build` to compile the shadow VT100 parser, and it currently
+# requires Zig 0.15.x exactly (0.16 broke their build API). We pin
+# `zig@0.15` from homebrew and force-link it so `which zig` matches.
+setup:
+    @echo "→ Termic dev environment bootstrap"
+    @set -e; \
+    if ! command -v brew >/dev/null 2>&1; then \
+        echo "✗ homebrew required. Install from https://brew.sh and re-run."; \
+        exit 1; \
+    fi; \
+    echo "→ Checking Rust toolchain"; \
+    if ! command -v cargo >/dev/null 2>&1; then \
+        echo "  installing via rustup-init"; \
+        brew install rustup-init && rustup-init -y --no-modify-path; \
+        source "$HOME/.cargo/env"; \
+    else \
+        echo "  ✓ cargo present ($(cargo --version))"; \
+    fi; \
+    echo "→ Checking Node"; \
+    if ! command -v node >/dev/null 2>&1; then \
+        echo "  installing node"; brew install node; \
+    else \
+        echo "  ✓ node present ($(node --version))"; \
+    fi; \
+    echo "→ Checking Zig 0.15.x (libghostty-vt-sys build.rs requirement)"; \
+    if ! command -v zig >/dev/null 2>&1 || ! zig version | grep -q '^0\.15\.'; then \
+        echo "  installing zig@0.15"; \
+        brew unlink zig 2>/dev/null || true; \
+        brew install zig@0.15; \
+        brew link --force --overwrite zig@0.15; \
+        if ! zig version | grep -q '^0\.15\.'; then \
+            echo "✗ Zig still not 0.15.x after install. PATH issue?"; exit 1; \
+        fi; \
+    else \
+        echo "  ✓ zig $(zig version)"; \
+    fi; \
+    echo "→ Installing npm packages"; \
+    npm install; \
+    echo "→ Pre-fetching Rust crate index + libghostty source (cargo check)"; \
+    echo "  first run clones ghostty into target/ and runs 'zig build' (~1min)"; \
+    (cd src-tauri && cargo check) >/dev/null; \
+    echo ""; \
+    echo "✓ Setup complete. Try: just dev"
+
+# Verify the dev env without installing anything. Useful for CI or
+# pre-PR sanity. Exits nonzero on the first missing dep so the message
+# is whatever you need to fix.
+doctor:
+    @set -e; \
+    fail=0; \
+    check() { \
+        local name="$1"; local cmd="$2"; local ver="${3-}"; \
+        if command -v "$cmd" >/dev/null 2>&1; then \
+            local v="$($cmd $ver 2>&1 | head -1)"; \
+            echo "  ✓ $name: $v"; \
+        else \
+            echo "  ✗ $name: missing"; fail=1; \
+        fi; \
+    }; \
+    check brew brew --version; \
+    check rust cargo --version; \
+    check node node --version; \
+    if command -v zig >/dev/null 2>&1; then \
+        v="$(zig version)"; \
+        if echo "$v" | grep -q '^0\.15\.'; then \
+            echo "  ✓ zig: $v"; \
+        else \
+            echo "  ✗ zig: $v (need 0.15.x — libghostty-vt-sys requires it)"; fail=1; \
+        fi; \
+    else \
+        echo "  ✗ zig: missing"; fail=1; \
+    fi; \
+    if [ -d node_modules ]; then echo "  ✓ node_modules present"; else echo "  ✗ node_modules missing (run: npm install)"; fail=1; fi; \
+    if [ $fail -eq 0 ]; then echo ""; echo "✓ Dev env looks good."; else echo ""; echo "✗ Run 'just setup' to fix."; exit 1; fi
+
 # ─── dev ──────────────────────────────────────────────────────────────
 
 # Run termic in dev mode (Vite HMR + Rust auto-rebuild).
