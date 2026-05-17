@@ -121,3 +121,4 @@ coverage/
 .npmrc.local
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+.tmp-*
