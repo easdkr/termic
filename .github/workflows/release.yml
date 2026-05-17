@@ -32,10 +32,13 @@ jobs:
     # `macos-13` (x86_64) matrix entry when we want Intel coverage.
     runs-on: macos-14
     outputs:
-      version:  ${{ steps.meta.outputs.version }}
-      dmg_name: ${{ steps.meta.outputs.dmg_name }}
-      dmg_sha:  ${{ steps.meta.outputs.dmg_sha }}
-      sig:      ${{ steps.meta.outputs.sig }}
+      version:   ${{ steps.meta.outputs.version }}
+      dmg_name:  ${{ steps.meta.outputs.dmg_name }}
+      # SHA + sig live on the `hashes` step (not `meta`); the previous
+      # release shipped empty values into the cask + manifest because
+      # this block referenced the wrong step id.
+      dmg_sha:   ${{ steps.hashes.outputs.dmg_sha }}
+      sig:       ${{ steps.hashes.outputs.sig }}
 
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +48,12 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # arm64 dmg + tarball names follow Tauri's convention.
-          echo "dmg_name=Termic_${VERSION}_aarch64.dmg" >> "$GITHUB_OUTPUT"
+          # Tauri lower-cases the productName for the .dmg filename.
+          # Don't assume capitalization - APFS made local checks lie
+          # because the FS is case-insensitive; GitHub Releases URLs
+          # are case-SENSITIVE so the cask must reference exactly
+          # what Tauri produced.
+          echo "dmg_name=termic_${VERSION}_aarch64.dmg" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -186,7 +193,7 @@ jobs:
             "platforms": {
               "darwin-aarch64": {
                 "signature": "$SIG",
-                "url": "https://github.com/${{ github.repository }}/releases/download/v$VERSION/Termic_${VERSION}_aarch64.app.tar.gz"
+                "url": "https://github.com/${{ github.repository }}/releases/download/v$VERSION/termic.app.tar.gz"
               }
             }
           }
