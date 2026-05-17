@@ -845,6 +845,133 @@ fn workspace_diff(id: String) -> Result<String, String> {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct SendDiffResult {
+    pub tracked_files: usize,
+    pub untracked_files: usize,
+}
+
+/// Bring a worktree's diff (committed + staged + unstaged + untracked)
+/// into the project's main checkout as uncommitted changes. Lets the user
+/// review/merge from their main repo without opening Fork inside the
+/// worktree path. Hard-blocks if the main checkout is dirty — refusing
+/// to mix is safer than trying to merge two sets of uncommitted work.
+///
+/// Mechanics:
+///   1. tracked: `git diff --binary <base>` in the worktree, piped through
+///      `git apply --3way --whitespace=nowarn` in the main checkout.
+///      `--binary` keeps binary blobs intact; `--3way` falls back to a
+///      three-way merge on lines that drifted in main.
+///   2. untracked: enumerated via `git ls-files --others --exclude-standard`
+///      in the worktree, copied byte-for-byte into the main checkout.
+///      We honor .gitignore (that's what --exclude-standard does) so
+///      build artifacts / .venv / node_modules don't get dragged in.
+///
+/// Skips workspaces where `is_repo_root` is true — those ARE the main
+/// checkout, there's nothing to send.
+#[tauri::command]
+async fn workspace_send_diff_to_main(id: String) -> Result<SendDiffResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<SendDiffResult, String> {
+        let w = load_workspaces().into_iter().find(|w| w.id == id).ok_or("no such workspace")?;
+        let p = load_projects().into_iter().find(|p| p.id == w.project_id).ok_or("project missing")?;
+        if w.is_repo_root {
+            return Err("This workspace IS the main checkout — nothing to send.".into());
+        }
+        let worktree = PathBuf::from(&w.path);
+        let main = PathBuf::from(&p.root_path);
+        if !main.is_dir() {
+            return Err(format!("Project main checkout missing: {}", main.display()));
+        }
+
+        // Refuse to write into a dirty main checkout. Mixing two
+        // half-finished change sets is the kind of thing the user
+        // recovers from with `git stash` + tears. Surface this clearly
+        // so they can stash/commit on their side first.
+        let main_status = git(&["status", "--porcelain"], &main).map_err(|e| e.to_string())?;
+        if !main_status.trim().is_empty() {
+            return Err("Main checkout has uncommitted changes. Commit or stash there first, then retry.".into());
+        }
+
+        // ── tracked diff (committed + staged + unstaged vs base) ──
+        // `git diff <base>` in a worktree returns the cumulative delta
+        // between base and the working tree — exactly the union of
+        // commits + staged + unstaged. --binary preserves binary blobs.
+        let base = w.base_branch.clone();
+        let patch_out = std::process::Command::new("git")
+            .args(["--no-pager", "diff", "--binary", &base])
+            .current_dir(&worktree)
+            .output()
+            .map_err(|e| format!("git diff failed to start: {e}"))?;
+        if !patch_out.status.success() {
+            return Err(format!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&patch_out.stderr)
+            ));
+        }
+        let patch_bytes = patch_out.stdout;
+
+        let mut tracked_files = 0usize;
+        if !patch_bytes.is_empty() {
+            // Count file headers in the patch (`diff --git a/x b/y`) so
+            // the UI can report something concrete to the user.
+            tracked_files = patch_bytes
+                .windows(11)
+                .filter(|w| w.starts_with(b"diff --git "))
+                .count();
+
+            use std::io::Write;
+            let mut child = std::process::Command::new("git")
+                .args(["apply", "--3way", "--whitespace=nowarn", "-"])
+                .current_dir(&main)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("git apply failed to start: {e}"))?;
+            {
+                let stdin = child.stdin.as_mut().ok_or("apply: no stdin")?;
+                stdin.write_all(&patch_bytes).map_err(|e| format!("apply: write: {e}"))?;
+            }
+            let out = child.wait_with_output().map_err(|e| format!("apply: wait: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "git apply failed in {}: {}",
+                    main.display(),
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+        }
+
+        // ── untracked files (honoring .gitignore) ──
+        // ls-files --others returns paths relative to the worktree
+        // root. --exclude-standard applies repo + global + per-dir
+        // gitignore so we don't drag in node_modules / .venv / etc.
+        let untracked = git(
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            &worktree,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut untracked_files = 0usize;
+        for rel in untracked.split('\0').filter(|s| !s.is_empty()) {
+            // Defensive: ls-files should never emit `..` or absolute
+            // paths here, but a malicious .gitignore + symlink trick
+            // could in theory. Reuse the existing safety helper.
+            let src = safe_workspace_path(&worktree, rel)
+                .map_err(|e| format!("untracked path rejected: {e}"))?;
+            let dst = main.join(rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            fs::copy(&src, &dst).map_err(|e| format!("copy {}: {e}", rel))?;
+            untracked_files += 1;
+        }
+
+        Ok(SendDiffResult { tracked_files, untracked_files })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ChangedFile {
     pub status: String, // "M", "A", "D", "??", "R", etc.
     pub path: String,
@@ -1689,7 +1816,7 @@ pub fn run() {
             projects_list, project_add, project_update, project_remove,
             workspaces_list, workspace_create, workspace_open_repo, workspace_archive, workspace_set_cli,
             workspace_delete, workspace_run_script, workspace_run_script_stream, workspace_stop_script, workspace_record_spawn, workspace_set_has_history,
-            workspace_diff, workspace_files,
+            workspace_diff, workspace_files, workspace_send_diff_to_main,
             workspace_changes, workspace_file_diff, workspace_file_read, workspace_dir_list,
             workspace_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,

@@ -13,10 +13,10 @@ import * as HoverCard from "@radix-ui/react-hover-card";
 import { Check } from "lucide-react";
 import {
   PanelLeft, PanelRight, FolderOpen, Play, Archive, ShieldCheck,
-  Sun, Moon, Monitor, Zap,
+  Sun, Moon, Monitor, Zap, ArrowUpToLine,
 } from "lucide-react";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
-import { openPath, workspaceRunScript, workspaceArchive } from "@/lib/ipc";
+import { openPath, workspaceRunScript, workspaceArchive, workspaceSendDiffToMain } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { cn } from "@/lib/utils";
@@ -81,7 +81,19 @@ export function UnifiedBar() {
         style={{ WebkitAppRegion: "no-drag" } as any}
       >
         <Tip content={compact ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
-          <Button size="icon" variant="icon" onClick={toggleCompact}>
+          <Button size="icon" variant="icon" onClick={() => {
+            // Suppress the 220ms grid-template-columns transition for
+            // this single toggle. Animating the column lerp makes the
+            // toggle feel laggy — user clicked a button, they expect
+            // instant. We restore the transition on the next frame so
+            // RightPanel show/hide still animates normally.
+            const root = document.documentElement;
+            root.style.setProperty("--cols-transition", "none");
+            toggleCompact();
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              root.style.removeProperty("--cols-transition");
+            }));
+          }}>
             <PanelLeft className="h-[18px] w-[18px]" />
           </Button>
         </Tip>
@@ -137,6 +149,37 @@ export function UnifiedBar() {
                 <span>Review</span>
               </Button>
             </Tip>
+            {/* Send-to-main: only shown on actual worktrees, not the
+                repo-root pseudo-workspace (which IS the main checkout —
+                nothing to send). Hard-blocks on a dirty main checkout
+                rather than risk mixing change sets; the error bubbles
+                up via the alert below. */}
+            {!ws.is_repo_root && (
+              <Tip content="Bring this worktree's diff into the project's main checkout" side="bottom">
+                <Button size="sm" variant="ghost" className="gap-1.5"
+                  onClick={async () => {
+                    if (!confirm(
+                      `Send "${ws.name}" diff into the main checkout?\n\n` +
+                      `This applies all tracked changes (committed + staged + unstaged) ` +
+                      `and copies untracked files into ${proj.root_path}.\n\n` +
+                      `The main checkout must be clean — commit or stash there first.`,
+                    )) return;
+                    try {
+                      const r = await workspaceSendDiffToMain(ws.id);
+                      alert(
+                        `Sent to main checkout.\n\n` +
+                        `Tracked file diffs applied: ${r.tracked_files}\n` +
+                        `Untracked files copied: ${r.untracked_files}`,
+                      );
+                    } catch (e) {
+                      alert(`Send to main failed:\n\n${e}`);
+                    }
+                  }}>
+                  <ArrowUpToLine className="h-4 w-4" />
+                  <span>Send to main</span>
+                </Button>
+              </Tip>
+            )}
             <Tip content="Archive workspace" side="bottom">
               <Button size="icon" variant="icon"
                 onClick={async () => {

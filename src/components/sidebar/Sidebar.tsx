@@ -126,7 +126,17 @@ export function Sidebar() {
                     // Settings → Repositories instead.
                     onClick={() => setProjectCollapsed(p.id, !collapsed)}
                     className={cn(
-                      "group flex items-center justify-between rounded-md text-[13.5px] font-semibold hover:bg-[var(--color-hover)] cursor-pointer",
+                      // Project row reads as a *section header*, not an item:
+                      // mono + smaller + uppercase + tracked-wide + dim
+                      // color, matching the "PROJECTS" header above. That
+                      // way workspaces (regular sans, normal case, brighter
+                      // text) read as the actual list items below their
+                      // section. Without this the project name was
+                      // bold-white and the workspaces were dim-white, which
+                      // visually flipped the hierarchy: heavier-looking
+                      // category labels competing with the items they
+                      // contained for attention.
+                      "group flex items-center justify-between rounded-md font-mono text-[12.5px] font-extrabold uppercase tracking-[0.06em] text-[var(--color-fg)] hover:bg-[var(--color-hover)] cursor-pointer transition-colors",
                       compact ? "px-0 py-1 justify-center" : "px-2 py-1.5",
                     )}
                   >
