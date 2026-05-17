@@ -115,9 +115,15 @@
     --color-border:      #49483e;
     --color-border-soft: #383830;
     --color-hover:       rgba(248, 248, 242, 0.05);
-    --color-sel:         rgba(249, 38, 114, 0.20);
-    --color-accent:      #f92672;
-    --color-accent-soft: rgba(249, 38, 114, 0.22);
+    --color-sel:         rgba(253, 151, 31, 0.22);
+    /* Chrome accent uses Monokai ORANGE (#fd971f) - the function-name
+       color. The iconic pink-red (#f92672) is fluorescent on warm-dark
+       surfaces and turned every active-row background into a stoplight;
+       orange is the friendlier Monokai accent for UI chrome while
+       still reading unmistakably as Monokai. Terminal cursor keeps the
+       pink-red for fidelity (see TERMINAL_THEMES.monokai). */
+    --color-accent:      #fd971f;
+    --color-accent-soft: rgba(253, 151, 31, 0.22);
     color-scheme: dark;
   }
 
