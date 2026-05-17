@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "termic",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.simion.termic",
   "build": {
     "frontendDist": "../dist",
@@ -20,7 +20,10 @@
         "minHeight": 600,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 14 },
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 14
+        },
         "visible": false
       }
     ],
@@ -51,7 +54,9 @@
         "https://termic.dev/updates/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgzOTlGNEM1N0QxOUMwQ0MKUldUTXdCbDl4ZlNaZzQxa0JSZGVLMWh4L3Jtb0xkU2paaU9reGNraWxVNStDcEx5bm1OY25UWjgK",
-      "windows": { "installMode": "passive" }
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
