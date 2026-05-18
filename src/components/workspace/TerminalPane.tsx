@@ -135,59 +135,37 @@ export function TerminalPane({ ws, tab, active }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
-    // ── Sender-driven status signals (no heuristics) ──────────────────
-    // OSC 0/2 — title change. Surface live so the tab reads e.g.
-    // "Ready (...)" (Gemini done) or "Action Required (...)" (Codex)
-    // without parsing stdout. Manual rename locks the tab against this
-    // (handled in setTabLiveTitle).
+    // ── Sender-driven status signals ──────────────────────────────────
     //
-    // Title-churn → "done" edge. Gemini doesn't emit OSC 9;4; it
-    // expresses progress by mutating its tab title many times per
-    // second while thinking and then going silent ("Ready (...)").
-    // Heuristic: if we saw >=2 title changes in the last 5s AND no
-    // further change arrives within ~10s, fire a "done" attention
-    // mark. Long silence threshold keeps false positives down — a
-    // brief mid-turn pause where gemini stops updating the title
-    // for a few seconds (writing a tool call, network round trip)
-    // shouldn't trip the indicator.
-    let titleCount = 0;
-    let titleFirstAt = 0;
-    let titleTimer: ReturnType<typeof setTimeout> | null = null;
-    term.onTitleChange(t => {
-      setTabLiveTitle(ws.id, tab.id, t);
-      const now = Date.now();
-      if (now - titleFirstAt > 5000) { titleCount = 0; titleFirstAt = now; }
-      titleCount++;
-      if (titleTimer) clearTimeout(titleTimer);
-      wdlog(`title change #${titleCount}`, t);
-      if (titleCount >= 2) {
-        titleTimer = setTimeout(() => {
-          wdlog(`title-churn settled → markAttention("done")`);
-          markAttention(ws.id, tab.id, "done");
-          titleCount = 0;
-        }, 10_000);
-      }
-    });
-    // Carry the timer so the cleanup path can cancel it; otherwise a
-    // tab close mid-churn could fire markAttention after the tab is
-    // gone (no-op but wasteful).
-    const cancelTitleTimer = () => { if (titleTimer) clearTimeout(titleTimer); };
-    // OSC 9;4 — ConEmu/iTerm progress protocol. State 1/3 = busy,
-    // state 0 = clear/done. On the busy → idle edge fire an attention
-    // mark so background workspaces light up in the sidebar exactly
-    // when the agent finished (Claude Code emits these reliably).
-    busyRef.current = false;
-    // Claude emits OSC 9;4;0 BETWEEN tool calls (each Bash/tool
-    // completes → clear, then next phase → busy again). Firing "done"
-    // on the first busy→idle edge produces false positives mid-turn.
+    // Each agent CLI has its own dialect (researched from upstream
+    // source). Termic listens to ALL of them so detection works
+    // regardless of which agent is running in this tab:
     //
-    // Combined detector: busy→idle SCHEDULES a done-mark for
-    // OSC_DONE_DELAY_MS. Each subsequent OSC 9;4 busy returns OR PTY
-    // data chunk PUSHES the timer out (debounce on output). Real turn-
-    // end stays both no-busy AND silent past the threshold and fires.
+    //   Claude Code → OSC 9;4 (ConEmu progress protocol). State 1/3 =
+    //     busy, state 0 = idle. The reliable signal. Caveat: Claude
+    //     emits 0 between tool calls too, so we debounce.
     //
-    // Set `localStorage.debugWorkDone = "1"` (devtools console) to log
-    // every signal — useful for diagnosing future false positives.
+    //   Gemini CLI → OSC 0 title with explicit per-state strings from
+    //     packages/cli/src/utils/windowTitle.ts:
+    //       "◇  Ready (folder)"           idle
+    //       "✦  Working… (folder)"        busy
+    //       "⏲  Working… (folder)"        busy (silent variant)
+    //       "✋  Action Required (folder)" busy/waiting (treat as busy
+    //                                      so the agent looks live;
+    //                                      attention dot is separate)
+    //
+    //   Codex → OSC 0 title with literal status words from
+    //     codex-rs/tui/src/chatwidget/status_surfaces.rs:
+    //       "Ready"                       idle
+    //       "Working" / "Thinking"        busy
+    //       "Waiting" / "Action Required" busy/waiting
+    //
+    // For unknown CLIs (custom agents) we fall back to the OSC 9;4
+    // signal only — no title heuristic, no churn timer (which always
+    // ran the risk of false positives).
+    //
+    // Set `localStorage.debugWorkDone = "1"` in devtools to log every
+    // signal — useful for diagnosing future mis-fires.
     const wdDebug = (() => { try { return localStorage.getItem("debugWorkDone") === "1"; } catch { return false; } })();
     const wdlog = (msg: string, extra?: unknown) => {
       if (!wdDebug) return;
@@ -195,25 +173,70 @@ export function TerminalPane({ ws, tab, active }: Props) {
       if (extra !== undefined) console.log(tag, msg, extra);
       else console.log(tag, msg);
     };
-    const OSC_DONE_DELAY_MS = 15_000;
-    let oscDoneTimer: ReturnType<typeof setTimeout> | null = null;
-    let oscDoneArmedAt = 0;
-    const cancelOscDoneTimer = (reason: string) => {
-      if (!oscDoneTimer) return;
-      clearTimeout(oscDoneTimer);
-      oscDoneTimer = null;
+
+    // Per-CLI title classifier. Returns "busy" / "idle" when the title
+    // matches a known state word for this agent; null when the agent
+    // doesn't speak title-state (or the title is generic).
+    const classifyTitle = (cli: string, title: string): "busy" | "idle" | null => {
+      const t = title.trim();
+      if (!t) return null;
+      if (cli === "gemini") {
+        if (t.startsWith("◇") || /^\s*Ready\b/.test(t)) return "idle";
+        if (t.startsWith("✦") || t.startsWith("⏲") || t.startsWith("✋")) return "busy";
+        if (/Working|Action Required/.test(t)) return "busy";
+        return null;
+      }
+      if (cli === "codex") {
+        if (/\bReady\b/.test(t)) return "idle";
+        if (/\b(Working|Thinking|Waiting|Action Required)\b/.test(t)) return "busy";
+        return null;
+      }
+      return null;
+    };
+
+    // Single done-timer shared between OSC 9;4 (Claude) and the title
+    // classifier (Gemini, Codex). Arming twice cancels the prior arm;
+    // any "busy" signal cancels outright. PTY data activity also pushes
+    // it out — see pushOscDoneRef below.
+    busyRef.current = false;
+    const OSC_DONE_DELAY_MS = 8_000;
+    const TITLE_DONE_DELAY_MS = 2_500;
+    let doneTimer: ReturnType<typeof setTimeout> | null = null;
+    let doneArmedAt = 0;
+    let doneArmedDelay = 0;
+    const cancelDoneTimer = (reason: string) => {
+      if (!doneTimer) return;
+      clearTimeout(doneTimer);
+      doneTimer = null;
       wdlog(`done-timer cancelled (${reason})`);
     };
-    const armOscDoneTimer = (reason: string) => {
-      if (oscDoneTimer) clearTimeout(oscDoneTimer);
-      oscDoneArmedAt = Date.now();
-      oscDoneTimer = setTimeout(() => {
+    const armDoneTimer = (reason: string, delay: number) => {
+      if (doneTimer) clearTimeout(doneTimer);
+      doneArmedAt = Date.now();
+      doneArmedDelay = delay;
+      doneTimer = setTimeout(() => {
         wdlog(`done-timer fired → markAttention("done")`);
         markAttention(ws.id, tab.id, "done");
-        oscDoneTimer = null;
-      }, OSC_DONE_DELAY_MS);
-      wdlog(`done-timer armed (${reason}) for ${OSC_DONE_DELAY_MS}ms`);
+        doneTimer = null;
+      }, delay);
+      wdlog(`done-timer armed (${reason}) for ${delay}ms`);
     };
+
+    // OSC 0/2 — title change. Always surface as the live tab label;
+    // additionally feed the per-CLI classifier for done detection.
+    term.onTitleChange(t => {
+      setTabLiveTitle(ws.id, tab.id, t);
+      const state = classifyTitle(tab.cli, t);
+      wdlog(`title change [classifier=${state ?? "unknown"}]`, t);
+      if (state === "idle") {
+        armDoneTimer(`title idle`, TITLE_DONE_DELAY_MS);
+      } else if (state === "busy") {
+        cancelDoneTimer(`title busy`);
+      }
+    });
+
+    // OSC 9;4 — Claude. Same arm/cancel as the title classifier so
+    // both paths funnel through one timer.
     term.parser.registerOscHandler(9, (data) => {
       const parts = data.split(";");
       if (parts[0] !== "4") return false;
@@ -221,27 +244,29 @@ export function TerminalPane({ ws, tab, active }: Props) {
       const nowBusy = state === 1 || state === 2 || state === 3 || state === 4;
       wdlog(`OSC 9;4;${state} (busy=${nowBusy}, was=${busyRef.current})`);
       if (busyRef.current && !nowBusy) {
-        armOscDoneTimer(`OSC 9;4;${state}`);
+        armDoneTimer(`OSC 9;4;${state}`, OSC_DONE_DELAY_MS);
       } else if (nowBusy) {
-        // Busy returned before the timer fired → not actually done.
-        cancelOscDoneTimer(`OSC 9;4;${state}`);
+        cancelDoneTimer(`OSC 9;4;${state}`);
       }
       busyRef.current = nowBusy;
-      // Return false so xterm keeps processing — we're observers, not
-      // taking ownership of the sequence.
       return false;
     });
+    // Backwards-compat names for the rest of this effect.
+    const cancelOscDoneTimer = cancelDoneTimer;
+    const armOscDoneTimer = (reason: string) => armDoneTimer(reason, OSC_DONE_DELAY_MS);
+    void cancelOscDoneTimer; void armOscDoneTimer;
     // Stash the push-on-data hook on a ref so the PTY data listener
     // (registered later in the spawn flow) can call it without holding
-    // a reference to oscDoneTimer directly.
+    // a direct reference to doneTimer. Output activity == agent still
+    // streaming, so push the timer out (regardless of which signal
+    // armed it — OSC 9;4 or title classifier).
     pushOscDoneRef.current = () => {
-      if (!oscDoneTimer) return;
-      const armedFor = Date.now() - oscDoneArmedAt;
+      if (!doneTimer) return;
       // Don't endlessly extend — cap at 60s total. If the agent is
-      // genuinely working that long without an OSC busy=true, fall
-      // back to the OSC handler at the next signal.
-      if (armedFor > 60_000) return;
-      armOscDoneTimer(`pty-data (extending)`);
+      // genuinely working that long without an OSC busy=true or a
+      // busy title, fall back to the next signal.
+      if (Date.now() - doneArmedAt > 60_000) return;
+      armDoneTimer(`pty-data (extending)`, doneArmedDelay);
     };
     // OSC 1337 — iTerm proprietary. RequestAttention=yes/fireworks is
     // an explicit "user, look at me." Treat as "done" too — both want
