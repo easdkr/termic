@@ -506,7 +506,7 @@ export function Sidebar() {
                                   reads as a status suffix, not a control. */}
                               {workDone && (
                                 <Tip content="Agent settled — waiting on you">
-                                  <span className="shrink-0 text-[var(--color-accent)]">
+                                  <span className="shrink-0 text-[var(--color-ok)]">
                                     <Check className="h-3.5 w-3.5" />
                                   </span>
                                 </Tip>
