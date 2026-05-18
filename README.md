@@ -7,6 +7,7 @@
 [![Latest release](https://img.shields.io/github/v/release/simion/termic?label=release&color=d97757)](https://github.com/simion/termic/releases/latest)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-d97757)](./LICENSE)
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-d97757)](https://github.com/simion/termic/releases/latest)
+[![Linux + Windows: build from source](https://img.shields.io/badge/Linux%20%2B%20Windows-build%20from%20source-d97757)](#linux-self-build-no-sandbox)
 [![termic.dev](https://img.shields.io/badge/website-termic.dev-d97757)](https://termic.dev)
 
 Free, open-source desktop app for running AI coding-agent CLIs in parallel,
@@ -52,6 +53,8 @@ xattr -dr com.apple.quarantine /Applications/Termic.app
 
 ### Build from source
 
+#### macOS (first-class)
+
 ```sh
 git clone https://github.com/simion/termic
 cd termic
@@ -59,6 +62,59 @@ make setup          # brew/rust/node + npm install + cargo check
 make dev            # vite HMR + Rust auto-rebuild
 make install        # build, copy to /Applications, launch
 ```
+
+#### Linux (self-build, no sandbox)
+
+There are no prebuilt Linux binaries yet, but the stack (Tauri 2 +
+portable-pty + xterm.js + WebKitGTK) builds and runs fine. **The
+sandbox feature is macOS-only** (it shells out to `sandbox-exec`); on
+Linux the workspace's Shield toggle is greyed out and agents run
+unsandboxed. Everything else — worktrees, parallel tabs, themes,
+in-app diff, the in-process CONNECT proxy — works as on macOS.
+
+Prerequisites on a recent Debian / Ubuntu:
+
+```sh
+sudo apt-get install -y \
+  build-essential curl wget file libssl-dev libayatana-appindicator3-dev \
+  librsvg2-dev libwebkit2gtk-4.1-dev libgtk-3-dev libudev-dev
+# Rust (stable) — https://rustup.rs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# Node 20+ via your package manager of choice (nvm/fnm/asdf/distro).
+
+git clone https://github.com/simion/termic
+cd termic
+npm install
+npm run tauri build              # → src-tauri/target/release/bundle/
+# .deb + .rpm + .AppImage land under appimage/ and deb/ inside bundle/
+```
+
+Run from source while hacking: `npm run tauri dev`.
+
+For Fedora / Arch / openSUSE, swap the apt line for your distro's
+equivalents of the same dev packages (the WebKitGTK 4.1 + GTK3 +
+AppIndicator3 + librsvg2 quartet is what Tauri 2 needs).
+
+#### Windows (self-build, no sandbox)
+
+Same story: no prebuilt binaries, build works, sandbox is a no-op.
+On Windows 11 (or Windows 10 with WebView2 Evergreen installed):
+
+1. Install [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (the "Desktop development with C++" workload).
+2. Install [Rust stable](https://www.rust-lang.org/tools/install) (rustup).
+3. Install [Node 20+](https://nodejs.org/) and [Git for Windows](https://git-scm.com/download/win).
+
+Then in PowerShell:
+
+```powershell
+git clone https://github.com/simion/termic
+cd termic
+npm install
+npm run tauri build              # → src-tauri\target\release\bundle\msi\
+```
+
+The `.msi` is unsigned — Windows SmartScreen will warn on first run.
+Click *More info → Run anyway* (or sign it yourself for distribution).
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev guide.
 
@@ -122,12 +178,14 @@ and the auto-restart-on-edit flow — see [CLAUDE.md](./CLAUDE.md)
 
 ## Status
 
-- **Platform:** macOS 12+ (Monterey or later).
-- **Architecture:** Apple Silicon (arm64) only at v0.1.x. Intel + Linux +
-  Windows in the roadmap — the underlying stack (Tauri 2, portable-pty,
-  xterm.js) supports them, just need CI matrix entries.
-- **Sandbox:** macOS-only (`sandbox-exec` is Apple's thing). Disabled
-  silently on other platforms when they ship.
+- **macOS:** first-class — universal binary (Apple Silicon + Intel),
+  signed updater, Homebrew cask. Requires macOS 12+ (Monterey).
+- **Linux + Windows:** build-from-source works today (Tauri 2 +
+  WebKitGTK / WebView2). No prebuilt binaries yet — CI matrix entries
+  + signed installers are on the roadmap.
+- **Sandbox:** macOS-only (`sandbox-exec` is Apple's frontend to
+  Seatbelt). On Linux + Windows the Shield toggle is greyed out and
+  agents run unsandboxed.
 
 ---
 
