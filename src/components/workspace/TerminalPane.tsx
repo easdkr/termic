@@ -174,21 +174,26 @@ export function TerminalPane({ ws, tab, active }: Props) {
       else console.log(tag, msg);
     };
 
-    // Per-CLI title classifier. Returns "busy" / "idle" when the title
-    // matches a known state word for this agent; null when the agent
-    // doesn't speak title-state (or the title is generic).
-    const classifyTitle = (cli: string, title: string): "busy" | "idle" | null => {
+    // Per-CLI title classifier. Three states:
+    //   "busy"      → agent is actively working; cancel any pending done-mark.
+    //   "idle"      → agent finished, no input needed; fire "done" (green ✓).
+    //   "attention" → agent stopped, waiting on user (Action Required,
+    //                 Waiting, ✋); fire "attention" (orange bell).
+    // Returns null when the title doesn't match any known state for
+    // this CLI.
+    const classifyTitle = (cli: string, title: string): "busy" | "idle" | "attention" | null => {
       const t = title.trim();
       if (!t) return null;
       if (cli === "gemini") {
+        if (t.startsWith("✋") || /Action Required/i.test(t)) return "attention";
         if (t.startsWith("◇") || /^\s*Ready\b/.test(t)) return "idle";
-        if (t.startsWith("✦") || t.startsWith("⏲") || t.startsWith("✋")) return "busy";
-        if (/Working|Action Required/.test(t)) return "busy";
+        if (t.startsWith("✦") || t.startsWith("⏲") || /Working/i.test(t)) return "busy";
         return null;
       }
       if (cli === "codex") {
+        if (/\b(Waiting|Action Required)\b/.test(t)) return "attention";
         if (/\bReady\b/.test(t)) return "idle";
-        if (/\b(Working|Thinking|Waiting|Action Required)\b/.test(t)) return "busy";
+        if (/\b(Working|Thinking)\b/.test(t)) return "busy";
         return null;
       }
       return null;
@@ -204,22 +209,27 @@ export function TerminalPane({ ws, tab, active }: Props) {
     let doneTimer: ReturnType<typeof setTimeout> | null = null;
     let doneArmedAt = 0;
     let doneArmedDelay = 0;
+    // The done-timer carries the REASON it was armed with so it can
+    // emit "done" (regular finish) or "attention" (Action Required /
+    // Waiting / OSC 1337 RequestAttention) → different sidebar icons.
+    let doneReason: "done" | "attention" = "done";
     const cancelDoneTimer = (reason: string) => {
       if (!doneTimer) return;
       clearTimeout(doneTimer);
       doneTimer = null;
       wdlog(`done-timer cancelled (${reason})`);
     };
-    const armDoneTimer = (reason: string, delay: number) => {
+    const armDoneTimer = (reason: string, delay: number, kind: "done" | "attention" = "done") => {
       if (doneTimer) clearTimeout(doneTimer);
       doneArmedAt = Date.now();
       doneArmedDelay = delay;
+      doneReason = kind;
       doneTimer = setTimeout(() => {
-        wdlog(`done-timer fired → markAttention("done")`);
-        markAttention(ws.id, tab.id, "done");
+        wdlog(`done-timer fired → markAttention("${doneReason}")`);
+        markAttention(ws.id, tab.id, doneReason);
         doneTimer = null;
       }, delay);
-      wdlog(`done-timer armed (${reason}) for ${delay}ms`);
+      wdlog(`done-timer armed (${reason}, kind=${kind}) for ${delay}ms`);
     };
 
     // OSC 0/2 — title change. Always surface as the live tab label;
@@ -229,7 +239,12 @@ export function TerminalPane({ ws, tab, active }: Props) {
       const state = classifyTitle(tab.cli, t);
       wdlog(`title change [classifier=${state ?? "unknown"}]`, t);
       if (state === "idle") {
-        armDoneTimer(`title idle`, TITLE_DONE_DELAY_MS);
+        armDoneTimer(`title idle`, TITLE_DONE_DELAY_MS, "done");
+      } else if (state === "attention") {
+        // "✋ Action Required" / "Waiting" — agent is blocked on the
+        // user. Fire faster than idle (no point waiting; the agent
+        // isn't going to do anything else until the user answers).
+        armDoneTimer(`title attention`, 600, "attention");
       } else if (state === "busy") {
         cancelDoneTimer(`title busy`);
       }
@@ -273,7 +288,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     // the sidebar dot + a notification.
     term.parser.registerOscHandler(1337, (data) => {
       if (/^RequestAttention=(yes|fireworks)$/i.test(data)) {
-        markAttention(ws.id, tab.id, "done");
+        markAttention(ws.id, tab.id, "attention");
       }
       return false;
     });

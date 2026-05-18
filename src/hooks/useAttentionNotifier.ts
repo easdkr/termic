@@ -52,6 +52,7 @@ export function useAttentionNotifier() {
             t.unread.reason === "bell" ? "wants input"
             : t.unread.reason === "exit" ? "exited"
             : t.unread.reason === "done" ? "finished"
+            : t.unread.reason === "attention" ? "needs your input"
             : "is idle";
           notify(`${w?.name || "workspace"} · ${t.type === "terminal" ? t.cli : t.type}`, `agent ${reason}`).catch(() => {});
           lastRouteRef.current = { wsId, tabId: t.id, firedAt: now };

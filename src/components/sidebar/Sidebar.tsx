@@ -6,7 +6,7 @@ import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
-import { LayoutGrid, History, RefreshCw, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Check, Bug, Mail, Shield } from "lucide-react";
+import { LayoutGrid, History, RefreshCw, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Check, Bell, Bug, Mail, Shield } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu } from "@/components/ui/Dropdown";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
@@ -59,6 +59,14 @@ export function Sidebar() {
     settledHighlight &&
     (tabs[wsId] || []).some(t =>
       t.type === "terminal" && (t.unread?.reason === "idle" || t.unread?.reason === "done"),
+    );
+  // Distinct from work-done: the agent is explicitly blocked on the
+  // user (Gemini ✋ Action Required, Codex Waiting, OSC 1337
+  // RequestAttention). Different sidebar icon (bell vs check).
+  const needsAttention = (wsId: string) =>
+    settledHighlight &&
+    (tabs[wsId] || []).some(t =>
+      t.type === "terminal" && t.unread?.reason === "attention",
     );
   const isLoaded = (wsId: string) =>
     (tabs[wsId] || []).some(t => t.type === "terminal" && t.ptyId);
@@ -389,6 +397,7 @@ export function Sidebar() {
                   const isRenaming = renaming?.kind === "ws" && renaming.id === w.id;
                   const unread = isUnread(w.id);
                   const workDone = isWorkDone(w.id);
+                  const attention = needsAttention(w.id);
                   const loaded = isLoaded(w.id);
                   const asleep = !loaded && !unread && activeWs !== w.id;
                   const isRepo = !!w.is_repo_root;
@@ -450,7 +459,7 @@ export function Sidebar() {
                           // the check carry the signal. Brand color is
                           // reserved for "louder" unread reasons (bell,
                           // exit) where the green check doesn't apply.
-                          unread && !workDone
+                          unread && !workDone && !attention
                             ? (CLI_BRAND_COLOR[w.cli] || "text-[var(--color-fg)]")
                             : activeWs === w.id
                               ? "text-[var(--color-fg)]"
@@ -516,7 +525,19 @@ export function Sidebar() {
                                   on `settledHighlight` pref (Settings →
                                   General). Sits after the label so it
                                   reads as a status suffix, not a control. */}
-                              {workDone && (
+                              {/* Attention takes precedence over work-done:
+                                  the agent is BLOCKED on your input (yes/no,
+                                  approve, answer prompt). Bell + warning
+                                  color reads as more urgent than the calm
+                                  green ✓. */}
+                              {attention && (
+                                <Tip content="Agent needs your input">
+                                  <span className="shrink-0 text-[var(--color-warn)]">
+                                    <Bell className="h-4 w-4" strokeWidth={2.5} />
+                                  </span>
+                                </Tip>
+                              )}
+                              {workDone && !attention && (
                                 <Tip content="Agent settled — waiting on you">
                                   <span className="shrink-0 text-[var(--color-ok)]">
                                     <Check className="h-4 w-4" strokeWidth={3} />

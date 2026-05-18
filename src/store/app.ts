@@ -94,7 +94,7 @@ interface AppState {
   /** Update the tab's PTY-driven `OSC 0/2` title. No-op when the user
    *  has manually renamed the tab (`customTitle === true`). */
   setTabLiveTitle: (wsId: string, tabId: string, liveTitle: string) => void;
-  markAttention: (wsId: string, tabId: string, reason: "bell" | "idle" | "exit" | "done") => void;
+  markAttention: (wsId: string, tabId: string, reason: "bell" | "idle" | "exit" | "done" | "attention") => void;
   clearAttention: (wsId: string, tabId: string) => void;
 }
 

@@ -274,8 +274,9 @@ export interface BaseTab {
    *  becomes active. Renders as a small dot independent of unread. */
   needsAttention?: boolean;
   /** Triggered when the tab requires user attention (BEL, idle, exit,
-   *  agent-emitted "done"). */
-  unread?: { reason: "bell" | "idle" | "exit" | "done" } | null;
+   *  agent-emitted "done" or explicit "attention" — agent is blocked
+   *  waiting for the user to approve/answer). */
+  unread?: { reason: "bell" | "idle" | "exit" | "done" | "attention" } | null;
 }
 
 export interface TerminalTab extends BaseTab {
