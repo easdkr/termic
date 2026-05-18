@@ -135,7 +135,35 @@ export function TerminalPane({ ws, tab, active }: Props) {
     // "Ready (...)" (Gemini done) or "Action Required (...)" (Codex)
     // without parsing stdout. Manual rename locks the tab against this
     // (handled in setTabLiveTitle).
-    term.onTitleChange(t => setTabLiveTitle(ws.id, tab.id, t));
+    //
+    // Title-churn → "done" edge. Gemini doesn't emit OSC 9;4; it
+    // expresses progress by mutating its tab title many times per
+    // second while thinking and then going silent ("Ready (...)").
+    // Heuristic: if we saw >=2 title changes in the last 5s AND no
+    // further change arrives within ~1.8s, fire a "done" attention
+    // mark. Cheap, false-positive-resistant (a single late title
+    // bump doesn't trigger; programs that change title only on user
+    // action don't churn).
+    let titleCount = 0;
+    let titleFirstAt = 0;
+    let titleTimer: ReturnType<typeof setTimeout> | null = null;
+    term.onTitleChange(t => {
+      setTabLiveTitle(ws.id, tab.id, t);
+      const now = Date.now();
+      if (now - titleFirstAt > 5000) { titleCount = 0; titleFirstAt = now; }
+      titleCount++;
+      if (titleTimer) clearTimeout(titleTimer);
+      if (titleCount >= 2) {
+        titleTimer = setTimeout(() => {
+          markAttention(ws.id, tab.id, "done");
+          titleCount = 0;
+        }, 1800);
+      }
+    });
+    // Carry the timer so the cleanup path can cancel it; otherwise a
+    // tab close mid-churn could fire markAttention after the tab is
+    // gone (no-op but wasteful).
+    const cancelTitleTimer = () => { if (titleTimer) clearTimeout(titleTimer); };
     // OSC 9;4 — ConEmu/iTerm progress protocol. State 1/3 = busy,
     // state 0 = clear/done. On the busy → idle edge fire an attention
     // mark so background workspaces light up in the sidebar exactly
