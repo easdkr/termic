@@ -170,13 +170,29 @@ export function TerminalPane({ ws, tab, active }: Props) {
     // mark so background workspaces light up in the sidebar exactly
     // when the agent finished (Claude Code emits these reliably).
     busyRef.current = false;
+    // Claude emits OSC 9;4;0 BETWEEN tool calls (each Bash/tool
+    // completes → clear, then next phase → busy again). Firing "done"
+    // on the first busy→idle edge produces false positives mid-turn.
+    // Debounce: schedule the mark a few seconds out, cancel if busy
+    // returns. Real turn-end stays idle past the threshold and fires.
+    let oscDoneTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelOscDoneTimer = () => {
+      if (oscDoneTimer) { clearTimeout(oscDoneTimer); oscDoneTimer = null; }
+    };
     term.parser.registerOscHandler(9, (data) => {
       const parts = data.split(";");
       if (parts[0] !== "4") return false;
       const state = Number(parts[1] ?? "0");
       const nowBusy = state === 1 || state === 2 || state === 3 || state === 4;
       if (busyRef.current && !nowBusy) {
-        markAttention(ws.id, tab.id, "done");
+        cancelOscDoneTimer();
+        oscDoneTimer = setTimeout(() => {
+          markAttention(ws.id, tab.id, "done");
+          oscDoneTimer = null;
+        }, 4_000);
+      } else if (nowBusy) {
+        // Busy returned before the timer fired → not actually done.
+        cancelOscDoneTimer();
       }
       busyRef.current = nowBusy;
       // Return false so xterm keeps processing — we're observers, not
