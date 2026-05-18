@@ -544,6 +544,20 @@ fn pty_spawn(
     for (k, v) in &args.env {
         cmd.env(k, v);
     }
+    // Multi-repo: expose sibling ports so the agent (or anything the
+    // user runs in this PTY) can `curl localhost:$TERMIC_PORT_API`
+    // without hardcoding. Same scheme as the script-stream spawn.
+    if let Some(wid) = args.workspace_id.as_deref() {
+        if let Some(ws) = load_workspaces().into_iter().find(|w| w.id == wid) {
+            for (i, m) in ws.composition.iter().enumerate() {
+                let p = if m.port == 0 { ws.port.saturating_add(i as u16 + 1) } else { m.port };
+                let sanitized: String = m.dir_name.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                    .collect();
+                cmd.env(format!("TERMIC_PORT_{sanitized}"), p.to_string());
+            }
+        }
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
@@ -1608,6 +1622,19 @@ fn workspace_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<
             }
         })
         .collect();
+    // Sibling port discovery for setup scripts (same scheme as
+    // workspace_run_script_stream). TERMIC_PORT_<DIR> for every
+    // member so a setup script that needs to know e.g. the API's
+    // port can read it.
+    let sibling_ports: Vec<(String, u16)> = ws.composition.iter().enumerate()
+        .map(|(i, m)| {
+            let p = if m.port == 0 { ws.port.saturating_add(i as u16 + 1) } else { m.port };
+            let sanitized: String = m.dir_name.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                .collect();
+            (format!("TERMIC_PORT_{sanitized}"), p)
+        })
+        .collect();
     if member_setups.is_empty() {
         let _ = app.emit(&format!("setup-done://{}", ws.id),
             serde_json::json!({ "code": 0, "success": true }));
@@ -1621,13 +1648,16 @@ fn workspace_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<
                 use std::process::Stdio;
                 let _ = app2.emit(&format!("setup-output://{}", ws_id),
                     serde_json::json!({ "line": format!("[{label}] $ {script}") }));
-                let spawn_res = Command::new("bash")
-                    .arg("-lc").arg(script).current_dir(cwd)
+                let mut cmd = Command::new("bash");
+                cmd.arg("-lc").arg(script).current_dir(cwd)
                     .env("TERMIC_PORT", port.to_string())
                     .env("TERMIC_WORKSPACE_NAME", &name)
                     .env("TERMIC_TASK", &name)
-                    .stdout(Stdio::piped()).stderr(Stdio::piped())
-                    .spawn();
+                    .stdout(Stdio::piped()).stderr(Stdio::piped());
+                for (k, v) in &sibling_ports {
+                    cmd.env(k, v.to_string());
+                }
+                let spawn_res = cmd.spawn();
                 let mut child = match spawn_res {
                     Ok(c) => c,
                     Err(e) => {
@@ -2873,11 +2903,26 @@ fn workspace_run_script_stream(
     let emit_done_o = emit_done.clone();
     let app_o = app.clone();
 
+    // Cross-member port discovery: every script gets a
+    // TERMIC_PORT_<DIR> var for each composition member (including
+    // itself) so service A can talk to service B without hardcoding
+    // ports. <DIR> is the dir_name uppercased with non-alphanumerics
+    // replaced by `_` (env var names must be `[A-Z_][A-Z0-9_]*`).
+    let sibling_ports: Vec<(String, u16)> = w.composition.iter().enumerate()
+        .map(|(i, m)| {
+            let p = if m.port == 0 { w.port.saturating_add(i as u16 + 1) } else { m.port };
+            let sanitized: String = m.dir_name.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                .collect();
+            (format!("TERMIC_PORT_{sanitized}"), p)
+        })
+        .collect();
+
     thread::spawn(move || {
         // `process_group(0)` puts the child in its own group so we can kill
         // the whole tree later via `kill(-pgid, SIGTERM)`.
-        let spawn_res = Command::new("bash")
-            .arg("-lc").arg(&script)
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc").arg(&script)
             .current_dir(&cwd)
             .env("TERMIC_PORT", port.to_string())
             .env("TERMIC_WORKSPACE_NAME", &name)
@@ -2888,8 +2933,11 @@ fn workspace_run_script_stream(
             .env("CONDUCTOR_WORKSPACE_NAME", &name)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn();
+            .process_group(0);
+        for (k, v) in &sibling_ports {
+            cmd.env(k, v.to_string());
+        }
+        let spawn_res = cmd.spawn();
         let mut child = match spawn_res {
             Ok(c) => c,
             Err(e) => {
