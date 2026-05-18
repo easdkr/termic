@@ -103,7 +103,7 @@ export function GeneralSection() {
       <div className="border-t border-[var(--color-border-soft)] pt-6">
         <Toggle
           label="Work-done indicator"
-          hint="Color a workspace's agent icon when its agent finishes a turn (i.e., the agent is waiting on you). Driven by the agent's own OSC 9;4 / RequestAttention / title signals — no idle heuristic, no false positives. On by default."
+          hint="Color a workspace's agent icon when its agent finishes a turn and is waiting on you."
           value={settledHighlight}
           onChange={setSettledHighlight}
         />
