@@ -237,13 +237,16 @@ function AgentsTabs({
           active one. Keeps the visual language consistent across
           settings pages. */}
       <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--color-border-soft)]">
-        {agents.map(a => (
+        {agents.map((a, idx) => (
           <button
             key={a.id}
             type="button"
             onClick={() => setActiveId(a.id)}
             className={cn(
-              "relative -mb-px flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors",
+              "relative -mb-px flex items-center gap-1.5 py-2 text-[13px] font-medium transition-colors",
+              // First tab sits flush with the page edge; everything
+              // else gets normal horizontal padding.
+              idx === 0 ? "pr-3" : "px-3",
               a.id === active.id
                 ? "text-[var(--color-fg)]"
                 : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
@@ -257,7 +260,13 @@ function AgentsTabs({
               <span title="Modified from ship defaults" className="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
             )}
             {a.id === active.id && (
-              <span className="absolute inset-x-2 bottom-0 h-[2px] rounded-t bg-[var(--color-accent)]" />
+              <span className={cn(
+                "absolute bottom-0 h-[2px] rounded-t bg-[var(--color-accent)]",
+                // First tab: underline hugs the left edge so it lines
+                // up with the page gutter; subsequent tabs get the
+                // standard inset.
+                idx === 0 ? "left-0 right-2" : "inset-x-2",
+              )} />
             )}
           </button>
         ))}
