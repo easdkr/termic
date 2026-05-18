@@ -32,6 +32,18 @@ export function TabBar({ ws }: { ws: Workspace }) {
   function spawnTab(cli: string) {
     addTab(ws.id, { id: crypto.randomUUID(), type: "terminal", title: cli, cli });
     setOpen(false);
+    // Focus the new tab's terminal so the user can start typing without
+    // an extra click. Poll briefly because xterm's hidden helper-
+    // textarea isn't in the DOM until the spawn effect commits a few
+    // frames later. Targets the MAIN tabstrip — bottom-split shells
+    // are their own pane (data-bottom-split).
+    const tryFocus = (tries = 20) => {
+      const root = document.querySelector(".termic-tabstrip")?.parentElement;
+      const el = root?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+      if (el) { el.focus(); return; }
+      if (tries > 0) setTimeout(() => tryFocus(tries - 1), 25);
+    };
+    tryFocus();
   }
 
   return (
