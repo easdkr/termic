@@ -11,7 +11,7 @@ import { useApp } from "@/store/app";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
-import { workspaceSetSandbox, workspaceTestSandbox, sandboxAvailable, type ProbeResult } from "@/lib/ipc";
+import { settingsLoad, workspaceSetSandbox, workspaceTestSandbox, sandboxAvailable, type ProbeResult } from "@/lib/ipc";
 import { AlertTriangle, Shield, Zap, FlaskConical, Check, X } from "lucide-react";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 
@@ -87,6 +87,22 @@ export function WorkspaceSandboxDialog() {
   };
 
   if (!wsId) return null;
+
+  // Has the form drifted from the saved workspace? Compare textareas
+  // by their normalized line-array form (trim, drop blanks) so that
+  // whitespace-only edits (an extra newline at the end) don't count
+  // as dirty. The Save button stays disabled until something actually
+  // changed — including the enable/disable toggle.
+  const splitLines = (s: string) =>
+    s.split("\n").map(l => l.trim()).filter(Boolean);
+  const arrEq = (a: string[], b: string[]) =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
+  const dirty = ws ? (
+    enabled !== !!ws.sandbox_enabled ||
+    !arrEq(splitLines(rwText),    ws.sandbox_rw_paths      ?? []) ||
+    !arrEq(splitLines(denyText),  ws.sandbox_deny_paths    ?? []) ||
+    !arrEq(splitLines(hostsText), ws.sandbox_allowed_hosts ?? [])
+  ) : false;
 
   async function save() {
     if (!ws || busy) return;
@@ -182,7 +198,29 @@ export function WorkspaceSandboxDialog() {
             // basically invisible against the green panel). "Enable
             // sandbox" stays the standard accent-deep primary.
             variant={enabled ? "secondary" : "primary"}
-            onClick={() => setEnabled(!enabled)}
+            onClick={async () => {
+              const next = !enabled;
+              setEnabled(next);
+              // First-time enable: if all three lists are empty, seed
+              // them from the union of project + global defaults so
+              // the user starts with a sensible baseline instead of a
+              // blank cage. Only fires when there's nothing to lose.
+              if (next && !rwText.trim() && !denyText.trim() && !hostsText.trim()) {
+                try {
+                  const s = await settingsLoad();
+                  const merge = (g: string[] = [], pr: string[] = []) => {
+                    const seen = new Set<string>(); const out: string[] = [];
+                    for (const v of [...g, ...pr]) {
+                      if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+                    }
+                    return out.join("\n");
+                  };
+                  setRwText   (merge(s.sandbox_default_rw_paths,      project?.sandbox_rw_paths));
+                  setDenyText (merge(s.sandbox_default_deny_paths,    project?.sandbox_deny_paths));
+                  setHostsText(merge(s.sandbox_default_allowed_hosts, project?.sandbox_allowed_hosts));
+                } catch {}
+              }
+            }}
             disabled={osSandboxOk === false && !enabled}
             title={osSandboxOk === false ? "Sandbox is macOS-only (requires sandbox-exec). Not available on this platform." : undefined}
             className={enabled
@@ -417,7 +455,12 @@ export function WorkspaceSandboxDialog() {
             gets after autogrow expands the textareas. */}
         <div className="mt-3 flex shrink-0 justify-end gap-2 border-t border-[var(--color-border-soft)] pt-3">
           <Button variant="ghost" type="button" onClick={close} disabled={busy}>Cancel</Button>
-          <Button variant="primary" type="button" onClick={save} disabled={busy} className="gap-1.5">
+          <Button
+            variant="primary" type="button" onClick={save}
+            disabled={busy || !dirty}
+            title={!dirty ? "No changes to save" : undefined}
+            className="gap-1.5"
+          >
             <Shield className="h-3.5 w-3.5" fill="currentColor" />
             {busy ? "Saving…" : "Save & restart terminal"}
           </Button>

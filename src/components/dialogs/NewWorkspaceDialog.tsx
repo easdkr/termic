@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
-import { workspaceCreate } from "@/lib/ipc";
+import { workspaceCreate, settingsLoad } from "@/lib/ipc";
 import { slugify, cn } from "@/lib/utils";
 import { Check, Loader2, AlertTriangle, Shield } from "lucide-react";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
@@ -84,9 +84,23 @@ export function NewWorkspaceDialog() {
     // the project.
     const globalDefault = usePrefs.getState().globalDefaultSandbox;
     setSandbox(!!p?.default_sandbox || globalDefault);
+    // Seed with project's lists immediately; once Settings loads,
+    // merge global defaults on top (dedupe-preserving order).
     setSbRw((p?.sandbox_rw_paths ?? []).join("\n"));
     setSbDeny((p?.sandbox_deny_paths ?? []).join("\n"));
     setSbHosts((p?.sandbox_allowed_hosts ?? []).join("\n"));
+    settingsLoad().then(s => {
+      const merge = (g: string[] = [], pr: string[] = []) => {
+        const seen = new Set<string>(); const out: string[] = [];
+        for (const v of [...g, ...pr]) {
+          if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+        }
+        return out.join("\n");
+      };
+      setSbRw(merge(s.sandbox_default_rw_paths,      p?.sandbox_rw_paths));
+      setSbDeny(merge(s.sandbox_default_deny_paths,  p?.sandbox_deny_paths));
+      setSbHosts(merge(s.sandbox_default_allowed_hosts, p?.sandbox_allowed_hosts));
+    }).catch(() => {});
     setPhase("form"); setSetupLog([]); setCreatedWsId(null);
     // CRITICAL: also reset `busy`. On a successful prior creation we
     // intentionally leave busy=true (so the form can't be re-submitted

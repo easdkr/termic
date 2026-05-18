@@ -28,7 +28,7 @@ brew install --cask simion/termic/termic
 ```
 
 That single command auto-taps `simion/homebrew-termic`, downloads the
-latest `.dmg`, and installs `termic.app` into `/Applications`. No
+latest `.dmg`, and installs `Termic.app` into `/Applications`. No
 Gatekeeper warning — the tap is configured to bypass it.
 
 Updates: Termic ships with a self-updater. When a new release lands you'll
@@ -47,7 +47,7 @@ launch may show the "unidentified developer" Gatekeeper prompt — right-click
 the app → Open, or strip the quarantine attribute:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/termic.app
+xattr -dr com.apple.quarantine /Applications/Termic.app
 ```
 
 ### Build from source
@@ -57,7 +57,7 @@ git clone https://github.com/simion/termic
 cd termic
 make setup          # brew/rust/node + npm install + cargo check
 make dev            # vite HMR + Rust auto-rebuild
-make run            # build, install to /Applications, launch
+make install        # build, copy to /Applications, launch
 ```
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev guide.

@@ -210,7 +210,7 @@ export const useApp = create<AppState>((set, get) => ({
   // z-40 overlay (App.tsx). Preserving the underlying state means closing
   // Settings drops the user back into the exact workspace + tab they were
   // in, terminals still running, no context lost.
-  openSettings: (tab = "appearance", repoId) =>
+  openSettings: (tab = "general", repoId) =>
     set(s => ({ view: { ...s.view, settingsTab: tab, settingsRepoId: repoId, settingsOpen: true } as View })),
   closeSettings: () =>
     set(s => ({ view: { ...s.view, settingsOpen: false } as View })),

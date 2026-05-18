@@ -126,6 +126,12 @@ export interface Settings {
   repos_dir: string;
   welcomed: boolean;
   agents: Agent[];
+  /** Global sandbox defaults. Merged with the per-project lists when
+   *  a workspace is created with sandbox enabled; pre-filled into the
+   *  Edit Sandbox dialog when the user enables the cage from scratch. */
+  sandbox_default_rw_paths?: string[];
+  sandbox_default_deny_paths?: string[];
+  sandbox_default_allowed_hosts?: string[];
 }
 
 export interface DiscoveredRepo {

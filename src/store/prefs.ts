@@ -347,7 +347,7 @@ const initialTerminalSize = lsGetNum(LS_TERMINAL_SIZE, 13);
 const initialTerminalWeight = lsGetNum(LS_TERMINAL_WEIGHT, 400);
 const initialEditorSize   = lsGetNum(LS_EDITOR_SIZE, 13);
 const initialLigatures    = lsGetBool(LS_LIGATURES, true);
-const initialTheme        = parseThemeMode(lsGet(LS_THEME, "dark"));
+const initialTheme        = parseThemeMode(lsGet(LS_THEME, "vscode"));
 const initialYolo         = lsGetBool(LS_YOLO, false);
 const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
 // WIP feature - the "agent has settled" heuristic produces false

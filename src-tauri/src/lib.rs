@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 extern crate libc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -864,9 +864,26 @@ fn workspace_create_sync(app: AppHandle, args: CreateWorkspaceArgs) -> Result<Wo
     // before clicking Create); whatever it sends is what we store.
     // If the dialog sends None we fall back to the project's
     // defaults verbatim - same effective outcome.
-    let sandbox_rw_paths = args.sandbox_rw_paths.unwrap_or_else(|| proj.sandbox_rw_paths.clone());
-    let sandbox_deny_paths = args.sandbox_deny_paths.unwrap_or_else(|| proj.sandbox_deny_paths.clone());
-    let sandbox_allowed_hosts = args.sandbox_allowed_hosts.unwrap_or_else(|| proj.sandbox_allowed_hosts.clone());
+    // Workspace inherits the union of GLOBAL defaults (Settings →
+    // General) and the PROJECT's per-repo defaults. The dialog
+    // already merges these for the user, so when args.x is Some we
+    // honor it verbatim; when it's None (older callers / non-UI
+    // entry points) we still get the merged set.
+    let globals = load_settings_inner();
+    let merge = |g: &[String], p: &[String]| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for v in g.iter().chain(p.iter()) {
+            if seen.insert(v.clone()) { out.push(v.clone()); }
+        }
+        out
+    };
+    let sandbox_rw_paths = args.sandbox_rw_paths
+        .unwrap_or_else(|| merge(&globals.sandbox_default_rw_paths, &proj.sandbox_rw_paths));
+    let sandbox_deny_paths = args.sandbox_deny_paths
+        .unwrap_or_else(|| merge(&globals.sandbox_default_deny_paths, &proj.sandbox_deny_paths));
+    let sandbox_allowed_hosts = args.sandbox_allowed_hosts
+        .unwrap_or_else(|| merge(&globals.sandbox_default_allowed_hosts, &proj.sandbox_allowed_hosts));
     let ws = Workspace {
         id: args.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
         project_id: proj.id.clone(),
@@ -2006,6 +2023,14 @@ pub struct Settings {
     /// Workspaces reference these by `id`. Always seeded with the built-ins on
     /// first load so the app is usable out of the box.
     pub agents: Vec<Agent>,
+    /// Global sandbox defaults. Merged with the per-project lists when a
+    /// workspace gets created with sandbox enabled, and pre-filled into
+    /// the sandbox dialog when the user enables the cage from scratch.
+    /// Workspaces still freeze a per-workspace copy at creation time —
+    /// editing these later only affects NEW workspaces.
+    pub sandbox_default_rw_paths: Vec<String>,
+    pub sandbox_default_deny_paths: Vec<String>,
+    pub sandbox_default_allowed_hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

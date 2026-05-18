@@ -121,8 +121,8 @@ build: ## Build a release .app + .dmg bundle. Output in src-tauri/target/release
 	@npm run tauri build
 .PHONY: build
 
-install: build ## Build + copy the .app to /Applications, replacing any prior install.
-	@APP_NAME="termic"; \
+install: build ## Build a release .app, copy it to /Applications (replacing any prior copy), and launch.
+	@APP_NAME="Termic"; \
 	BUNDLE_ID="com.simion.termic"; \
 	SRC="src-tauri/target/release/bundle/macos/$$APP_NAME.app"; \
 	DEST="/Applications/$$APP_NAME.app"; \
@@ -138,15 +138,13 @@ install: build ## Build + copy the .app to /Applications, replacing any prior in
 	touch "$$DEST"; \
 	/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$$DEST" 2>/dev/null || true; \
 	killall Finder 2>/dev/null || true; \
-	echo "✓ Installed. Launch with: open $$DEST"
+	echo "→ Launching $$DEST"; \
+	open "$$DEST"; \
+	echo "✓ Installed."
 .PHONY: install
 
-run: install ## Build, install, AND launch — one-liner for "ship it and try it".
-	@open "/Applications/termic.app"
-.PHONY: run
-
 uninstall: ## Remove the installed copy from /Applications (user data untouched).
-	@rm -rf /Applications/termic.app && echo "✓ Removed /Applications/termic.app"
+	@rm -rf /Applications/Termic.app /Applications/termic.app && echo "✓ Removed Termic.app from /Applications"
 .PHONY: uninstall
 
 # ─── cleanup ──────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ Open an [issue](https://github.com/simion/termic/issues/new) with:
 
 1. **macOS version + arch** (`sw_vers && uname -m`)
 2. **Termic version** (toolbar → theme picker → look at the corner, or
-   `defaults read /Applications/termic.app/Contents/Info CFBundleShortVersionString`)
+   `defaults read /Applications/Termic.app/Contents/Info CFBundleShortVersionString`)
 3. **What you did, what you expected, what actually happened**
 4. **The debug log** if the bug is sandbox-related or a hang —
    `tail -200 "$(python3 -c 'import tempfile; print(tempfile.gettempdir() + "/termic-debug.log")')"`
