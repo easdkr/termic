@@ -5,6 +5,8 @@
 import { usePrefs, MONO_FONT_OPTIONS, availableMonoFonts, availableMonoFontsAsync } from "@/store/prefs";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { AuxTerminal } from "@/components/workspace/AuxTerminal";
+import { homeDir } from "@/lib/ipc";
 
 export function AppearanceSection() {
   const editorFontId    = usePrefs(s => s.editorFontId);
@@ -80,12 +82,30 @@ export function AppearanceSection() {
         }
       />
 
-      <div className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[var(--color-fg)]"
+      {/* Live terminal preview — spawns a real shell in $HOME so
+          font + size + weight changes are reflected immediately
+          with real keystrokes, cursor blink, and ANSI colors.
+          Fixed height so font resizes don't push the page around. */}
+      <TerminalPreview />
+      {/* Legacy static preview (kept off behind the `false` gate so
+          a future revert is a one-flag change). */}
+      {false && (<div className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[var(--color-fg)]"
            style={{ fontFamily: stackById(terminalFontId), fontSize: `${terminalFontSize}px`, fontWeight: terminalFontWeight, lineHeight: 1.4 }}>
         <span className="text-[#7cd57e]">~/project</span> <span className="text-[#d97757]">main</span> <span className="text-[#f0b13a]">±3</span><br/>
         <span className="text-[#d97757]">{"〉"}</span> npm test <span className="text-[#7cd57e]">✓</span><br/>
         <span className="text-[#a7f3a0]">└─▶ All tests passed!</span>
-      </div>
+      </div>)}
+    </div>
+  );
+}
+
+function TerminalPreview() {
+  const [home, setHome] = useState<string>("");
+  useEffect(() => { void homeDir().then(setHome).catch(() => setHome("/tmp")); }, []);
+  if (!home) return null;
+  return (
+    <div className="overflow-hidden rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]" style={{ height: 380 }}>
+      <AuxTerminal wsPath={home} active={true} />
     </div>
   );
 }
@@ -150,8 +170,12 @@ function WeightPicker({ value, onChange }: { value: number; onChange: (w: number
           key={w} type="button" onClick={() => onChange(w)}
           className={cn(
             "h-7 rounded-[5px] px-2.5 text-[12px] transition-colors",
+            // accent-deep matches every other "active filled pill" in
+            // the app (CLI picker, theme picker tile, settings tabs).
+            // Plain --color-accent is too washed-out on cobalt's navy
+            // surfaces — same reason --color-accent-deep exists.
             value === w
-              ? "bg-[var(--color-accent)] text-white"
+              ? "bg-[var(--color-accent-deep)] text-white"
               : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
           )}
           // Render each pill's label in its own weight — gives a live preview

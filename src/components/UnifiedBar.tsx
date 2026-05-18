@@ -148,17 +148,46 @@ export function UnifiedBar() {
       </div>
 
       {/* Breadcrumbs / title — text doesn't select on drag (matches AppKit title bar). */}
-      <div className="ml-2 flex min-w-0 flex-1 select-none items-center gap-2 text-[14px]">
+      <div className="ml-2 flex min-w-0 flex-1 select-none items-baseline gap-2 text-[14px]">
         {ws && proj ? (
           <>
             <span className="text-[var(--color-fg-faint)]">{proj.name}</span>
             <span className="text-[var(--color-fg-faint)]">/</span>
-            <span className={cn("flex items-center", CLI_BRAND_COLOR[ws.cli])}>
+            {/* self-center pulls the icon off the baseline so it
+                stays vertically centered next to text — items-baseline
+                on the parent would otherwise stick the icon's bottom
+                to the text baseline and float it too high. */}
+            <span className={cn("flex items-center self-center", CLI_BRAND_COLOR[ws.cli])}>
               <CliIcon cli={ws.cli} className="h-4 w-4" />
             </span>
-            <span className="truncate font-medium text-[var(--color-fg)]">{ws.name}</span>
-            <span className="text-[var(--color-fg-faint)]">on</span>
-            <span className="truncate font-mono text-[12px] text-[var(--color-fg-dim)]">{ws.branch}</span>
+            <span className="truncate font-medium leading-none text-[var(--color-fg)]">{ws.name}</span>
+            <span className="leading-none text-[var(--color-fg-faint)]">on</span>
+            <span className="truncate font-mono text-[12px] leading-none text-[var(--color-fg-dim)]">{ws.branch}</span>
+            {/* Multi-repo: list each member with its frozen branch so
+                the user can see at-a-glance what worktrees + live
+                checkouts are mounted under this workspace. Compact —
+                hidden on narrow widths to protect the breadcrumb. */}
+            {(ws.composition?.length ?? 0) > 0 && (
+              // Use leading-none everywhere in this strip so the
+              // chips share a baseline with the breadcrumb instead
+              // of dropping a few px. inline-flex + items-center on
+              // the LIVE pill keeps its label vertically centered
+              // inside its rounded bg without nudging the row.
+              <div className="hidden min-w-0 items-center gap-1.5 overflow-hidden font-mono text-[12px] leading-none text-[var(--color-fg-faint)] lg:flex">
+                <span className="opacity-50">·</span>
+                {ws.composition!.map((m, i) => (
+                  <span key={m.project_id} className="flex shrink-0 items-center gap-1 leading-none">
+                    {i > 0 && <span className="opacity-50">·</span>}
+                    <span className="text-[var(--color-fg-dim)] leading-none">{m.dir_name}</span>
+                    {m.mode === "worktree" ? (
+                      <span className="text-[var(--color-fg-faint)] leading-none">@{m.branch}</span>
+                    ) : (
+                      <span className="inline-flex items-center rounded bg-[var(--color-warn)]/15 px-1 py-[1px] text-[10px] font-sans uppercase tracking-wider leading-none text-[var(--color-warn)]">live</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
           </>
         ) : (
           <span className="text-[var(--color-fg-faint)]">No workspace selected</span>
@@ -236,6 +265,8 @@ export function UnifiedBar() {
                     // on disk is untouched and can be re-opened later.
                     message: ws.is_repo_root
                       ? "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched — you can re-open it any time. Any agent running here will be terminated."
+                      : (ws.composition?.length ?? 0) > 0
+                      ? `Branches stay in git — you can recreate the workspace later. This removes: the host worktree + every member worktree (${ws.composition!.filter(m => m.mode === "worktree").map(m => m.dir_name).join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`
                       : "The branch stays in git — you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
                     confirmLabel: ws.is_repo_root ? "Remove entry" : "Archive",
                     destructive: true,

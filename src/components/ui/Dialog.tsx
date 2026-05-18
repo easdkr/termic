@@ -12,10 +12,15 @@ interface Props {
   description?: string;
   className?: string;
   hideClose?: boolean;
+  /** Class name for the dim backdrop. Override for stacked dialogs
+   *  (a Confirm opening on top of another AppDialog) — pass
+   *  `"bg-transparent"` so two backdrops don't compose into double-
+   *  dimming + flicker. */
+  overlayClassName?: string;
   children: ReactNode;
 }
 
-export function AppDialog({ open, onOpenChange, title, description, className, hideClose, children }: Props) {
+export function AppDialog({ open, onOpenChange, title, description, className, hideClose, overlayClassName, children }: Props) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -34,7 +39,10 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
         <Dialog.Overlay
           data-tauri-drag-region
           style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-          className="fixed inset-0 z-40 bg-black/65 data-[state=open]:animate-in data-[state=open]:fade-in-0"
+          className={cn(
+            "fixed inset-0 z-40 data-[state=open]:animate-in data-[state=open]:fade-in-0",
+            overlayClassName ?? "bg-black/65",
+          )}
         />
         {/* Vertical centering is safe ONLY because Dialog.Content below sets
             an explicit `translate3d(0,0,0)` — that promotes it to its own
@@ -47,6 +55,12 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
             className={cn(
               "relative grid w-full max-w-md gap-2 pointer-events-auto",
               "rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-1)] p-5 shadow-2xl",
+              // Always cap at viewport height with internal scroll so
+              // tall content (multi-repo project create with many
+              // members, etc.) never pushes the action buttons below
+              // the fold. Dialogs that manage their own scrolling can
+              // override these via className.
+              "max-h-[calc(100vh-2rem)] overflow-y-auto",
               // Promote to its own compositing layer with an explicit
               // integer-offset transform — WebKit snaps a layer with
               // `translate3d(0,0,0)` to whole pixels, which keeps text

@@ -6,7 +6,7 @@ import { useApp, useWorkspaceTabs, useActiveTabId } from "@/store/app";
 import { Button } from "@/components/ui/Button";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
-import { Plus, X, GitCompare, FileText, Pencil, SquareSplitVertical } from "lucide-react";
+import { Plus, X, GitCompare, FileText, SquareSplitVertical } from "lucide-react";
 import { Tip } from "@/components/ui/Tooltip";
 import { cn } from "@/lib/utils";
 
@@ -40,7 +40,6 @@ export function TabBar({ ws }: { ws: Workspace }) {
         <TabPill
           key={t.id} ws={ws} tab={t} active={t.id === activeId}
           onSelect={() => setActive(ws.id, t.id)} onClose={() => closeTab(ws.id, t.id)}
-          canClose={tabs.length > 1}
           renaming={renaming?.id === t.id ? renaming.value : null}
           onStartRename={() => setRenaming({ id: t.id, value: t.title })}
           onChangeRename={(v) => setRenaming(r => r ? { ...r, value: v } : r)}
@@ -87,8 +86,8 @@ function SplitToggle({ wsId }: { wsId: string }) {
   );
 }
 
-function TabPill({ ws: _ws, tab, active, onSelect, onClose, canClose, renaming, onStartRename, onChangeRename, onCommitRename, onCancelRename }: {
-  ws: Workspace; tab: Tab; active: boolean; onSelect: () => void; onClose: () => void; canClose: boolean;
+function TabPill({ ws: _ws, tab, active, onSelect, onClose, renaming, onStartRename, onChangeRename, onCommitRename, onCancelRename }: {
+  ws: Workspace; tab: Tab; active: boolean; onSelect: () => void; onClose: () => void;
   renaming: string | null;  // current draft value while renaming, else null
   onStartRename: () => void;
   onChangeRename: (v: string) => void;
@@ -141,17 +140,16 @@ function TabPill({ ws: _ws, tab, active, onSelect, onClose, canClose, renaming, 
       ) : (
         <span className="truncate">{tab.title}</span>
       )}
+      {/* Close button — ALWAYS visible (was hover-only), and shown
+          on every tab including the default one. Closing the very
+          last tab puts the workspace to sleep (closeTab in the app
+          store clears activeWorkspaceId in that branch). Rename
+          lives behind dbl-click on the title; no pencil affordance
+          to keep the tab compact. */}
       {!isRenaming && (
         <button
-          title="Rename tab"
-          className="ml-0.5 rounded p-0.5 text-[var(--color-fg-faint)] opacity-0 hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)] group-hover:opacity-100"
-          onClick={(e) => { e.stopPropagation(); onStartRename(); }}
-        ><Pencil className="h-3 w-3" /></button>
-      )}
-      {canClose && !isRenaming && (
-        <button
           title="Close tab"
-          className="rounded p-0.5 text-[var(--color-fg-faint)] opacity-0 hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)] group-hover:opacity-100"
+          className="rounded p-0.5 text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
           onClick={(e) => { e.stopPropagation(); onClose(); }}
         ><X className="h-3 w-3" /></button>
       )}

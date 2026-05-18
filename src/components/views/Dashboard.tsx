@@ -90,8 +90,7 @@ export function Dashboard() {
                   >
                     {wsList.length === 0 ? (
                       <div className="px-3 py-2 text-[12.5px] text-[var(--color-fg-faint)]">
-                        Nothing here yet. The <b>+</b> creates an isolated worktree; the folder
-                        icon opens the live <b>repo</b> checkout.
+                        Nothing here yet. Click <b>+</b> to start a new worktree or open the live <b>repo</b> checkout.
                       </div>
                     ) : (
                       <div className="flex flex-col">

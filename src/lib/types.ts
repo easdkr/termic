@@ -37,9 +37,22 @@ export interface Project {
    *  are worktrees of the host with each member worktree'd or
    *  symlinked inside named subdirs. */
   type?: "single" | "multi";
-  /** Member project ids — references rows already in projects.json.
-   *  Only meaningful when `type == "multi"`. */
-  members?: string[];
+  /** Multi-repo members with their per-project script overrides.
+   *  Each entry pins a member-project id + the scripts to run for
+   *  that member when used INSIDE this multi-repo project. Empty
+   *  scripts = skip. Only meaningful when `type == "multi"`. */
+  members?: ProjectMember[];
+}
+
+/** Per-member entry on a multi-repo Project. The scripts are
+ *  multi-repo-project-scoped, not member-project-scoped — different
+ *  multi-repo projects can wire the same member to different
+ *  commands. */
+export interface ProjectMember {
+  project_id: string;
+  setup_script: string;
+  run_script: string;
+  archive_script: string;
 }
 
 export type MemberMode = "worktree" | "repo_root";
@@ -53,6 +66,17 @@ export interface WorkspaceMember {
   mode: MemberMode;
   branch: string;
   path: string;
+  /** Per-member port (frozen at create). Exposed as $TERMIC_PORT
+   *  when this member's script runs so siblings don't collide on
+   *  the same listening port. 0 = legacy workspace created before
+   *  per-member ports existed; falls back to the workspace's own. */
+  port?: number;
+  /** Per-member script overrides. Frozen at workspace creation from
+   *  the member project's own defaults; empty = the member skips
+   *  that script. */
+  setup_script?: string;
+  run_script?: string;
+  archive_script?: string;
 }
 
 export interface Workspace {
@@ -200,9 +224,22 @@ export interface ChangeFile {
   status: string;
 }
 
+export interface ChangeGroup {
+  name: string;
+  branch: string;
+  /** "host" | "worktree" | "repo_root" — drives the UI badge + the
+   *  click-to-diff gate (repo_root files canonicalize outside the
+   *  wrapper, so safe_workspace_path would reject them). */
+  kind: "host" | "worktree" | "repo_root";
+  path: string;
+  files: ChangeFile[];
+}
+
 export interface Changes {
   files: ChangeFile[];
   count: number;
+  /** Per-repo groupings. Single-repo workspaces have one entry. */
+  groups?: ChangeGroup[];
 }
 
 export interface FileEntry {

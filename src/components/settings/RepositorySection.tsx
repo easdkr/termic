@@ -6,12 +6,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
-import { projectUpdate, projectRemove } from "@/lib/ipc";
+import { projectUpdate, projectRemove, projectSetMembers } from "@/lib/ipc";
 import type { Project } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
-import { Trash2, Check } from "lucide-react";
+import { Trash2, Check, Layers, X } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export function RepositorySection({ projectId }: { projectId: string }) {
   const project = useApp(s => s.projects.find(p => p.id === projectId));
@@ -24,6 +25,21 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   const [draft, setDraft] = useState<Project | null>(null);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [err, setErr] = useState<string | null>(null);
+  // Per-field save-success flash. patch() records every field key
+  // touched between debounce intervals; on successful save those
+  // get put in `flashKeys` for ~2s, which the inputs use to render
+  // a green ring. Cleared automatically by the timer; the
+  // touchedKeys ref accumulates across rapid edits until the
+  // batched save fires.
+  const touchedKeys = useRef<Set<string>>(new Set());
+  const [flashKeys, setFlashKeys] = useState<Set<string>>(new Set());
+  const flashTimer = useRef<number | null>(null);
+  // Sub-tab inside the per-project page. "scripts" is the default
+  // landing tab — it's the most-edited surface. Reset on project
+  // switch so jumping between projects lands on the same starting
+  // point every time.
+  const [subTab, setSubTab] = useState<SubTab>("scripts");
+  useEffect(() => { setSubTab("scripts"); }, [projectId]);
   const saveTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   // Skip the save-on-mount that would otherwise fire when we hydrate `draft`
@@ -52,6 +68,10 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   if (!project || !draft) return <div className="text-[13.5px] text-[var(--color-fg-faint)]">Repository not found.</div>;
 
   async function performSave(next: Project) {
+    // Snapshot the keys we're about to commit + clear the accumulator
+    // so the next round of edits gets its own batch.
+    const batchKeys = new Set(touchedKeys.current);
+    touchedKeys.current = new Set();
     setStatus("saving"); setErr(null);
     try {
       const cleaned: Project = {
@@ -65,6 +85,12 @@ export function RepositorySection({ projectId }: { projectId: string }) {
       await projectUpdate(cleaned);
       await loadAll();
       setStatus("saved");
+      // Light up every field that was part of this save batch with a
+      // 2s green ring. Replaces (rather than unions) the previous
+      // flash so a fresh save resets the timer cleanly.
+      setFlashKeys(batchKeys);
+      if (flashTimer.current) window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(() => setFlashKeys(new Set()), 2000) as unknown as number;
       // Auto-fade the "Saved" indicator after a couple seconds so it
       // doesn't permanently occupy real estate.
       if (savedFlashTimer.current) window.clearTimeout(savedFlashTimer.current);
@@ -73,6 +99,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   }
 
   function patch<K extends keyof Project>(k: K, v: Project[K]) {
+    touchedKeys.current.add(k as string);
     setDraft(d => {
       if (!d) return d;
       const next = { ...d, [k]: v };
@@ -82,6 +109,16 @@ export function RepositorySection({ projectId }: { projectId: string }) {
       return next;
     });
   }
+  // Tailwind class fragment applied to an input/textarea for ~2s
+  // after a successful save of its field. Swaps the border color
+  // to ok-green (overriding both the resting and focused borders
+  // via `!important` so it wins even while the user is still in
+  // the field). transition-colors makes the swap fade in/out
+  // smoothly when the 2s window opens and closes.
+  const flashRing = (k: keyof Project) =>
+    flashKeys.has(k as string)
+      ? "!border-[var(--color-ok)] focus:!border-[var(--color-ok)] transition-colors"
+      : "transition-colors";
   void firstSync;  // reserved for future skip logic
 
   // Hoist into a const so TS keeps the non-null narrowing across closures.
@@ -123,190 +160,35 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     ? draft.files_to_copy.join("\n")
     : String(draft.files_to_copy ?? "");
 
+  const isMulti = (draft.type ?? "single") === "multi";
+  // Tab order signals importance + frequency of edit:
+  //   Scripts first  → the thing you actually came here to tune
+  //   Files / Sandbox → focused single-concept tabs
+  //   Advanced last  → set-once metadata (paths, branch, remote)
+  //                    + irreversible Remove action at the bottom
+  const tabs: { id: SubTab; label: string }[] = [
+    { id: "scripts",  label: isMulti ? "Members & scripts" : "Scripts & Setup" },
+    { id: "sandbox",  label: "Sandbox" },
+    { id: "advanced", label: "Advanced" },
+  ];
+
   return (
-    <div className="flex flex-col gap-7">
+    <div className="flex flex-col gap-6">
+      {/* Project-name input doubles as the page title — same pattern
+          as the previous flat layout, kept on top above the sub-tabs
+          so renaming is always one click away regardless of which
+          sub-tab is active. */}
       <div className="flex items-center gap-3">
         <input
           value={draft.name}
           onChange={(e) => patch("name", e.target.value)}
-          className="bg-transparent text-[20px] font-medium outline-none border-b border-transparent focus:border-[var(--color-accent)] min-w-0 flex-1"
+          className={cn(
+            "bg-transparent text-[20px] font-medium outline-none border-b border-transparent focus:border-[var(--color-accent)] min-w-0 flex-1",
+            flashKeys.has("name") && "border-b-[var(--color-ok)]",
+          )}
+          autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
         />
-      </div>
-
-      <Field
-        label="Root path"
-        hint="The git repo on disk. Do not move or delete this directory — remove the repository in Termic instead."
-        control={<Input value={draft.root_path} readOnly className="font-mono opacity-70 cursor-not-allowed" />}
-      />
-
-      <Field
-        label="Workspaces path"
-        hint="Where each new worktree lives. Don't move or delete subdirectories — archive workspaces in Termic instead."
-        control={<Input value={draft.workspaces_path} onChange={(e) => patch("workspaces_path", e.target.value)} className="font-mono" />}
-      />
-
-      <Field
-        label="Branch new workspaces from"
-        hint="Each workspace is an isolated copy of your codebase, branched off here."
-        control={<Input value={draft.base_branch} onChange={(e) => patch("base_branch", e.target.value)} className="font-mono" placeholder="origin/master" />}
-      />
-
-      <Field
-        label="Remote"
-        hint="Git remote name (used when resolving the base branch)."
-        control={<Input value={draft.remote} onChange={(e) => patch("remote", e.target.value)} className="font-mono" placeholder="origin" />}
-      />
-
-      <Field
-        label="Default CLI"
-        hint="Which agent to spawn for new workspaces in this repo."
-        control={
-          <select
-            value={draft.default_cli}
-            onChange={(e) => patch("default_cli", e.target.value)}
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]"
-          >
-            <option value="claude">claude</option>
-            <option value="gemini">gemini</option>
-            <option value="codex">codex</option>
-          </select>
-        }
-      />
-
-      <div>
-        <div className="text-[14px] font-medium">Preview URL</div>
-        <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-          Overrides the terminal panel's Open button URL. Supports Termic environment variables
-          (<code className="font-mono">$TERMIC_WORKSPACE_NAME</code>,
-          <code className="font-mono"> $TERMIC_PORT</code>, etc.). Leave blank to auto-detect from output logs.
-        </div>
-        <Input
-          value={draft.preview_url}
-          onChange={(e) => patch("preview_url", e.target.value)}
-          className="mt-2 font-mono"
-          placeholder="http://localhost:$TERMIC_PORT"
-        />
-      </div>
-
-      <div>
-        <div className="text-[14px] font-medium">Files to copy</div>
-        <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-          Termic will automatically copy these file paths from the repo root into each new workspace. One per line, glob patterns OK (e.g. <code className="font-mono">.env*</code>).
-        </div>
-        <textarea
-          value={filesText}
-          onChange={(e) => patch("files_to_copy", e.target.value.split("\n") as unknown as Project["files_to_copy"])}
-          rows={5}
-          placeholder=".env*&#10;src/config/local.py"
-          className="mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
-        />
-      </div>
-
-      {/* ── Sandbox ────────────────────────────────────────────────
-          Configured here (per-project), pinned per-workspace at
-          creation. Defaults (RW paths, deny carve-outs, allowed
-          hosts per CLI) are baked into Rust; these are the
-          per-project extras. Disabling the project default doesn't
-          affect existing workspaces - their pin is permanent. */}
-      <div className="border-t border-[var(--color-border-soft)] pt-6">
-        <h2 className="text-[16px] font-medium">Sandbox</h2>
-        <p className="mt-1 text-[12.5px] text-[var(--color-fg-dim)]">
-          When a workspace is sandboxed, the agent runs under macOS seatbelt: the filesystem is allow-listed (workspace + agent state + caches + dirs you list); HTTPS goes through an in-process per-workspace proxy filtered against the host allowlist. Secrets (<code className="font-mono">~/.ssh</code>, <code className="font-mono">~/.aws</code>, <code className="font-mono">~/.gnupg</code>, <code className="font-mono">~/.netrc</code>, <code className="font-mono">~/.kube</code>, …) and personal data (<code className="font-mono">~/Documents</code>, <code className="font-mono">~/Desktop</code>, <code className="font-mono">~/Downloads</code>, browser data, mail) are denied by default.
-        </p>
-
-        <div className="mt-4 flex flex-col gap-5">
-          <label className="inline-flex cursor-pointer items-center gap-2 select-none">
-            <Checkbox
-              checked={!!draft.default_sandbox}
-              onChange={(v) => patch("default_sandbox", v as any)}
-            />
-            <span className="text-[13.5px] font-medium">Sandbox new workspaces by default</span>
-          </label>
-
-          <Field
-            label="Allowed paths"
-            hint="Dirs the agent can read AND write. Workspace + agent state dirs + caches + TMPDIR + system dirs are always allowed. Add extras here. One per line. ~, $HOME, and $WORKSPACE expand at spawn time."
-            control={
-              <textarea
-                value={(draft.sandbox_rw_paths ?? []).join("\n")}
-                onChange={(e) => patch("sandbox_rw_paths", e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as any)}
-                rows={3}
-                placeholder={"$HOME/Work/other-project\n$HOME/Notes"}
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
-              />
-            }
-          />
-
-          <Field
-            label="Extra denied paths"
-            hint="On top of the built-in secret + personal-data deny list. Useful when you want to expose a parent dir but lock down a specific subdir inside it."
-            control={
-              <textarea
-                value={(draft.sandbox_deny_paths ?? []).join("\n")}
-                onChange={(e) => patch("sandbox_deny_paths", e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as any)}
-                rows={2}
-                placeholder="$WORKSPACE/.git/hooks"
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
-              />
-            }
-          />
-
-          <Field
-            label="Allowed hosts"
-            hint="One per line. Use * as a wildcard. Per-CLI vendor + GitHub + npm/pypi/crates.io are always allowed; these are extras."
-            control={
-              <textarea
-                value={(draft.sandbox_allowed_hosts ?? []).join("\n")}
-                onChange={(e) => patch("sandbox_allowed_hosts", e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as any)}
-                rows={4}
-                placeholder={"*.mycompany.com\nbitbucket.org"}
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
-              />
-            }
-          />
-        </div>
-      </div>
-
-      <div className="border-t border-[var(--color-border-soft)] pt-6">
-        <h2 className="text-[16px] font-medium">Scripts</h2>
-        <p className="mt-1 text-[12.5px] text-[var(--color-fg-dim)]">
-          Commands that run when workspaces are set up, run, or archived.
-        </p>
-
-        <div className="mt-4 flex flex-col gap-5">
-          <ScriptField
-            label="Setup script"
-            hint="Runs when a new workspace is created."
-            value={draft.setup_script}
-            onChange={(v) => patch("setup_script", v)}
-            placeholder="just up"
-          />
-          <ScriptField
-            label="Run script"
-            hint="Runs when you click the Run button."
-            value={draft.run_script}
-            onChange={(v) => patch("run_script", v)}
-            placeholder="npm run dev"
-          />
-          <ScriptField
-            label="Archive script"
-            hint="Runs before a workspace is archived."
-            value={draft.archive_script}
-            onChange={(v) => patch("archive_script", v)}
-            placeholder="rm -rf node_modules"
-          />
-        </div>
-      </div>
-
-      {err && <div className="text-[13px] text-[var(--color-err)]">{err}</div>}
-
-      <div className="flex items-center justify-between border-t border-[var(--color-border-soft)] pt-5">
-        <Button variant="danger" size="sm" onClick={remove}>
-          <Trash2 className="h-3.5 w-3.5" /> Remove repository
-        </Button>
-
-        {/* Auto-save status — debounced, no explicit Save button. */}
-        <div className="text-[12px] text-[var(--color-fg-faint)] min-h-[1em]">
+        <div className="text-[12px] text-[var(--color-fg-faint)] min-h-[1em] shrink-0">
           {status === "saving" && <span>Saving…</span>}
           {status === "saved"  && (
             <span className="flex items-center gap-1 text-[var(--color-ok)]">
@@ -316,9 +198,254 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           {status === "error"  && <span className="text-[var(--color-err)]">Save failed</span>}
         </div>
       </div>
+
+      {/* Sub-tab strip. Mirrors the top-level Settings rail's pill
+          shape but rendered horizontally inline with the page —
+          keeps the project page self-contained without nesting a
+          second sidebar. Active tab = filled bg-2, inactive = dim
+          fg + soft hover. Visible always so users can flip between
+          tabs without scrolling first. */}
+      <div className="flex items-center gap-1 border-b border-[var(--color-border-soft)]">
+        {tabs.map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setSubTab(t.id)}
+            className={cn(
+              "relative -mb-px flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors",
+              subTab === t.id
+                ? "text-[var(--color-fg)]"
+                : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
+            )}
+          >
+            {t.label}
+            {/* Underline that lines up with the bottom border of the
+                tab strip. -mb-px on the parent puts us right on top of
+                the border. */}
+            {subTab === t.id && (
+              <span className="absolute inset-x-2 bottom-0 h-[2px] rounded-t bg-[var(--color-accent)]" />
+            )}
+          </button>
+        ))}
+      </div>
+
+      {subTab === "scripts" && (
+        <div className="flex flex-col gap-7">
+          {/* Preview URL FIRST — the single field 90% of users come
+              here to set. Pinned to the very top of the page so it's
+              the first thing visible. Single-line input below a
+              tight description; users can identify and edit in
+              under a second. */}
+          <div>
+            <div className="text-[14px] font-medium">Preview URL</div>
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+              URL the terminal panel's Open button opens. Supports{" "}
+              <Token>$TERMIC_WORKSPACE_NAME</Token>,{" "}
+              <Token>$TERMIC_PORT</Token>, etc.
+              Blank = auto-detect from output logs.
+            </div>
+            <Input
+              value={draft.preview_url}
+              onChange={(e) => patch("preview_url", e.target.value)}
+              className={cn("mt-2 font-mono", flashRing("preview_url"))}
+              placeholder="http://localhost:$TERMIC_PORT"
+            />
+          </div>
+
+          {isMulti ? (
+            <MultiMembersEditor project={draft} onSaved={() => { void loadAll(); }} />
+          ) : (
+            // Tab title ("Scripts & Setup") + the per-field hints
+            // below already say what these are; an extra header
+            // would be noise.
+            <div className="flex flex-col gap-5">
+              <ScriptField
+                label="Setup script"
+                hint="Runs when a new workspace is created."
+                value={draft.setup_script}
+                onChange={(v) => patch("setup_script", v)}
+                placeholder="docker compose up -d"
+                flash={flashKeys.has("setup_script")}
+              />
+              <ScriptField
+                label="Run script"
+                hint={<>Runs when you click the Run button. Use <Token>$TERMIC_PORT</Token> so each workspace gets its own port.</>}
+                value={draft.run_script}
+                onChange={(v) => patch("run_script", v)}
+                placeholder="PORT=$TERMIC_PORT npm run dev"
+                flash={flashKeys.has("run_script")}
+              />
+              <ScriptField
+                label="Archive script"
+                hint="Runs before a workspace is archived. Termic already removes the worktree dir + its contents, so this is for stopping external services your run script started."
+                value={draft.archive_script}
+                onChange={(v) => patch("archive_script", v)}
+                placeholder="docker compose down"
+                flash={flashKeys.has("archive_script")}
+              />
+            </div>
+          )}
+
+          {/* Files to copy — every new workspace gets these copied
+              from the repo root. Same family as the setup script;
+              the parent flex gap already separates this section
+              visually, no divider line needed. */}
+          <div>
+            <div className="text-[14px] font-medium">Files to copy</div>
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+              Copied from the repo root into each new workspace. One per line, glob patterns OK (e.g. <code className="font-mono">.env*</code>).
+            </div>
+            <textarea
+              value={filesText}
+              onChange={(e) => patch("files_to_copy", e.target.value.split("\n") as unknown as Project["files_to_copy"])}
+              rows={6}
+              placeholder=".env*&#10;src/config/local.py"
+              autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+              className={cn(
+                "mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+                flashRing("files_to_copy"),
+              )}
+            />
+          </div>
+        </div>
+      )}
+
+      {subTab === "sandbox" && (
+        <div>
+          <h2 className="text-[16px] font-medium">Sandbox</h2>
+          <p className="mt-1 text-[12.5px] text-[var(--color-fg-dim)]">
+            When a workspace is sandboxed, the agent runs under macOS seatbelt: the filesystem is allow-listed (workspace + agent state + caches + dirs you list); HTTPS goes through an in-process per-workspace proxy filtered against the host allowlist. Secrets (<code className="font-mono">~/.ssh</code>, <code className="font-mono">~/.aws</code>, <code className="font-mono">~/.gnupg</code>, <code className="font-mono">~/.netrc</code>, <code className="font-mono">~/.kube</code>, …) and personal data (<code className="font-mono">~/Documents</code>, <code className="font-mono">~/Desktop</code>, <code className="font-mono">~/Downloads</code>, browser data, mail) are denied by default.
+          </p>
+          <div className="mt-4 flex flex-col gap-5">
+            <label className="inline-flex cursor-pointer items-center gap-2 select-none">
+              <Checkbox
+                checked={!!draft.default_sandbox}
+                onChange={(v) => patch("default_sandbox", v as any)}
+              />
+              <span className="text-[13.5px] font-medium">Sandbox new workspaces by default</span>
+            </label>
+            <Field
+              label="Allowed paths"
+              hint="Dirs the agent can read AND write. Workspace + agent state dirs + caches + TMPDIR + system dirs are always allowed. Add extras here. One per line. ~, $HOME, and $WORKSPACE expand at spawn time."
+              control={
+                <textarea
+                  value={(draft.sandbox_rw_paths ?? []).join("\n")}
+                  onChange={(e) => patch("sandbox_rw_paths", e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as any)}
+                  rows={3}
+                  placeholder={"$HOME/Work/other-project\n$HOME/Notes"}
+                  autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                  className={cn(
+                    "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+                    flashRing("sandbox_rw_paths"),
+                  )}
+                />
+              }
+            />
+            <Field
+              label="Extra denied paths"
+              hint="On top of the built-in secret + personal-data deny list. Useful when you want to expose a parent dir but lock down a specific subdir inside it."
+              control={
+                <textarea
+                  value={(draft.sandbox_deny_paths ?? []).join("\n")}
+                  onChange={(e) => patch("sandbox_deny_paths", e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as any)}
+                  rows={2}
+                  placeholder="$WORKSPACE/.git/hooks"
+                  autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                  className={cn(
+                    "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+                    flashRing("sandbox_deny_paths"),
+                  )}
+                />
+              }
+            />
+            <Field
+              label="Allowed hosts"
+              hint="One per line. Use * as a wildcard. Per-CLI vendor + GitHub + npm/pypi/crates.io are always allowed; these are extras."
+              control={
+                <textarea
+                  value={(draft.sandbox_allowed_hosts ?? []).join("\n")}
+                  onChange={(e) => patch("sandbox_allowed_hosts", e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as any)}
+                  rows={4}
+                  placeholder={"*.mycompany.com\nbitbucket.org"}
+                  autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                  className={cn(
+                    "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+                    flashRing("sandbox_allowed_hosts"),
+                  )}
+                />
+              }
+            />
+          </div>
+        </div>
+      )}
+
+      {subTab === "advanced" && (
+        <div className="flex flex-col gap-7">
+          <Field
+            label="Default CLI"
+            hint="Which agent to spawn for new workspaces in this repo."
+            control={
+              <select
+                value={draft.default_cli}
+                onChange={(e) => patch("default_cli", e.target.value)}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("default_cli"),
+                )}
+              >
+                <option value="claude">claude</option>
+                <option value="gemini">gemini</option>
+                <option value="codex">codex</option>
+              </select>
+            }
+          />
+          <Field
+            label="Root path"
+            hint="The git repo on disk. Do not move or delete this directory — remove the repository in Termic instead."
+            control={<Input value={draft.root_path} readOnly className="font-mono opacity-70 cursor-not-allowed" />}
+          />
+          <Field
+            label="Workspaces path"
+            hint="Where each new worktree lives. Don't move or delete subdirectories — archive workspaces in Termic instead."
+            control={<Input value={draft.workspaces_path} onChange={(e) => patch("workspaces_path", e.target.value)} className={cn("font-mono", flashRing("workspaces_path"))} />}
+          />
+          <Field
+            label="Branch new workspaces from"
+            hint="Each workspace is an isolated copy of your codebase, branched off here."
+            control={<Input value={draft.base_branch} onChange={(e) => patch("base_branch", e.target.value)} className={cn("font-mono", flashRing("base_branch"))} placeholder="origin/master" />}
+          />
+          <Field
+            label="Remote"
+            hint="Git remote name (used when resolving the base branch)."
+            control={<Input value={draft.remote} onChange={(e) => patch("remote", e.target.value)} className={cn("font-mono", flashRing("remote"))} placeholder="origin" />}
+          />
+
+          {/* Danger zone pinned to the bottom of Advanced — same
+              page as the rarely-touched metadata, since it's also
+              rarely-touched + irreversible. Distinct red card so it
+              can't be confused with the editable fields above. */}
+          <div className="mt-2 rounded-md border border-[var(--color-err)]/40 bg-[var(--color-err)]/5 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[13.5px] font-medium text-[var(--color-fg)]">Remove repository</div>
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                  Drops the project from the sidebar + archives every workspace under it. The actual repo at <code className="font-mono">{draft.root_path}</code> stays on disk.
+                </div>
+              </div>
+              <Button variant="danger" size="sm" onClick={remove} className="shrink-0">
+                <Trash2 className="h-3.5 w-3.5" /> Remove
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {err && <div className="text-[13px] text-[var(--color-err)]">{err}</div>}
     </div>
   );
 }
+
+type SubTab = "scripts" | "sandbox" | "advanced";
 
 function Field({ label, hint, control }: { label: string; hint?: string; control: React.ReactNode }) {
   return (
@@ -330,8 +457,15 @@ function Field({ label, hint, control }: { label: string; hint?: string; control
   );
 }
 
-function ScriptField({ label, hint, value, onChange, placeholder }: {
-  label: string; hint: string; value: string; onChange: (v: string) => void; placeholder?: string;
+function ScriptField({ label, hint, value, onChange, placeholder, flash }: {
+  label: string;
+  hint: React.ReactNode;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  /** When true (set by the parent for ~2s after a successful save
+   *  of this field), the textarea gets a soft green ring. */
+  flash?: boolean;
 }) {
   return (
     <div>
@@ -339,8 +473,255 @@ function ScriptField({ label, hint, value, onChange, placeholder }: {
       <div className="mt-0.5 text-[12px] text-[var(--color-fg-dim)]">{hint}</div>
       <textarea
         value={value} onChange={(e) => onChange(e.target.value)} rows={2} placeholder={placeholder}
-        className="mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        className={cn(
+          "mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+          "transition-colors",
+          flash && "!border-[var(--color-ok)] focus:!border-[var(--color-ok)]",
+        )}
       />
+    </div>
+  );
+}
+
+/** Inline mono chip for env-var / token mentions inside hint text.
+ *  Click selects the contents instantly so the user can ⌘C without
+ *  fiddling with text-selection on the surrounding hint. The
+ *  app-wide `user-select: none` chrome rule is opted-out via
+ *  select-text + cursor: text so the chip behaves like a real
+ *  copyable token. */
+function Token({ children }: { children: string }) {
+  return (
+    <code
+      onClick={(e) => {
+        const range = document.createRange();
+        range.selectNodeContents(e.currentTarget);
+        const sel = window.getSelection();
+        if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+      }}
+      // user-select: all makes the WHOLE token select as one unit
+      // on any selection gesture — including double-click, which
+      // would otherwise break at the `$` (browsers treat $ as a
+      // word boundary and skip it). Pairs with the click handler
+      // for the single-click-selects-all UX.
+      style={{ userSelect: "all", WebkitUserSelect: "all" }}
+      className="cursor-text rounded bg-[var(--color-accent-soft)] px-1 py-px font-mono text-[11.5px] text-[var(--color-accent)]"
+      title="Click to select"
+    >{children}</code>
+  );
+}
+
+/** Edit the member list of a multi-repo project. Lists single-repo
+ *  projects with a checkbox each; saving fires `project_set_members`
+ *  which validates + persists on the Rust side. Existing workspaces
+ *  under this project aren't migrated — their composition is frozen
+ *  at create time. Removing a member here only affects FUTURE
+ *  workspaces. */
+function MultiMembersEditor({ project, onSaved }: {
+  project: Project;
+  onSaved: () => void;
+}) {
+  const allProjects = useApp(s => s.projects);
+  const pushToast = useUI(s => s.pushToast);
+  type Row = { project_id: string; setup_script: string; run_script: string; archive_script: string };
+  // Local working copy of the member list with their script overrides.
+  // Hydrated from project.members; saving fires project_set_members.
+  const [rows, setRows] = useState<Row[]>(() => (project.members ?? []).map(m => ({ ...m })));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRows((project.members ?? []).map(m => ({ ...m })));
+  }, [project.id, JSON.stringify(project.members ?? [])]);
+
+  // Only single-repo projects are candidates (nested multi out of scope).
+  const candidates = allProjects.filter(
+    p => p.id !== project.id && (p.type ?? "single") === "single",
+  );
+
+  const initialJson = JSON.stringify(project.members ?? []);
+  const currentJson = JSON.stringify(rows);
+  const dirty = initialJson !== currentJson;
+
+  function toggle(id: string) {
+    setRows(prev => {
+      const exists = prev.some(r => r.project_id === id);
+      if (exists) return prev.filter(r => r.project_id !== id);
+      const proj = allProjects.find(p => p.id === id);
+      return [...prev, {
+        project_id: id,
+        setup_script:   proj?.setup_script   ?? "",
+        run_script:     proj?.run_script     ?? "",
+        archive_script: proj?.archive_script ?? "",
+      }];
+    });
+  }
+  function update(id: string, patch: Partial<Row>) {
+    setRows(prev => prev.map(r => r.project_id === id ? { ...r, ...patch } : r));
+  }
+
+  async function save() {
+    setBusy(true); setError(null);
+    try {
+      await projectSetMembers(project.id, rows);
+      pushToast(`Updated ${rows.length} member${rows.length === 1 ? "" : "s"} on “${project.name}”`, "success");
+      onSaved();
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 text-[14px] font-medium">
+        <Layers className="h-4 w-4 text-[var(--color-accent)]" /> Members & scripts
+      </div>
+      <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+        Repos to mount inside every workspace under this multi-repo project,
+        and the <b>Setup / Run / Archive</b> commands to use for each. These
+        scripts live on the multi-repo project (independent of the member
+        project's own scripts). Edits apply to <b>future</b> workspaces —
+        existing ones freeze at creation.
+      </div>
+      {/* Selected-members list — shows only what's IN the project.
+          Unselected candidates live behind the "Add member" picker
+          below so the panel doesn't double-scroll inside the page.
+          Each row collapses the script editors directly under its
+          header (no separate hover/toggle dance) since checking is
+          done via the explicit Remove button. */}
+      {rows.length === 0 ? (
+        <div className="mt-2 rounded-md border border-dashed border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-6 text-center text-[12.5px] text-[var(--color-fg-faint)]">
+          No members yet. Click <b>Add member</b> below to pick repos to mount under this multi-repo project.
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-col gap-2">
+          {rows.map(row => {
+            const c = allProjects.find(p => p.id === row.project_id);
+            if (!c) return null;
+            return (
+              <div key={row.project_id} className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)]">
+                <div className="flex items-center gap-3 px-3 py-2">
+                  <Layers className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13.5px] font-medium text-[var(--color-fg)]">{c.name}</div>
+                    <div className="truncate font-mono text-[11.5px] text-[var(--color-fg-faint)]">{c.root_path}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => toggle(c.id)}
+                    title="Remove from this multi-repo project"
+                    className="rounded p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-err)]/10 hover:text-[var(--color-err)]"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="flex flex-col gap-2 border-t border-[var(--color-border-soft)] bg-[var(--color-bg-1)]/40 px-3 py-2">
+                  <MemberScriptRow label="Setup"   value={row.setup_script}   placeholder={c.setup_script   || "docker compose up -d"}        onChange={v => update(c.id, { setup_script: v })} />
+                  <MemberScriptRow label="Run"     value={row.run_script}     placeholder={c.run_script     || "PORT=$TERMIC_PORT npm run dev"} onChange={v => update(c.id, { run_script: v })} />
+                  <MemberScriptRow label="Archive" value={row.archive_script} placeholder={c.archive_script || "docker compose down"}            onChange={v => update(c.id, { archive_script: v })} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Add-member picker: shows the list of available (not yet
+          added) repos when expanded. Collapses back to the button
+          after a row is clicked. Keeps the steady-state panel
+          short — only added members live there. */}
+      <AddMemberPicker
+        candidates={candidates.filter(c => !rows.some(r => r.project_id === c.id))}
+        onAdd={(id) => toggle(id)}
+      />
+      {error && <div className="mt-2 text-[12.5px] text-[var(--color-err)]">{error}</div>}
+      <div className="mt-3">
+        <Button variant="primary" size="sm" disabled={!dirty || busy} onClick={save}>
+          {busy ? "Saving…" : `Save members & scripts (${rows.length})`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function MemberScriptRow({ label, value, onChange, placeholder }: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="w-16 shrink-0 text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">
+        {label}
+      </label>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-1)] px-2 py-1 font-mono text-[12px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+      />
+    </div>
+  );
+}
+
+/** Collapsible "+ Add member" affordance for the multi-repo project's
+ *  members list. Default state = a single dashed button; click → list
+ *  of available candidates; click a candidate → adds + collapses back
+ *  (or stays open if more are still available). Keeps the steady-
+ *  state panel short. */
+function AddMemberPicker({ candidates, onAdd }: {
+  candidates: Project[];
+  onAdd: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Auto-collapse when nothing's left to add.
+  useEffect(() => { if (candidates.length === 0) setOpen(false); }, [candidates.length]);
+  if (candidates.length === 0 && !open) {
+    return (
+      <div className="mt-3 text-[11.5px] text-[var(--color-fg-faint)]">
+        Every other repository is already a member.
+      </div>
+    );
+  }
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-dashed border-[var(--color-border)] px-3 py-1.5 text-[13px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:text-[var(--color-fg)]"
+      >
+        + Add member
+      </button>
+    );
+  }
+  return (
+    <div className="mt-3 rounded-md border border-[var(--color-border-soft)]">
+      <div className="flex items-center justify-between px-3 py-1.5 text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">
+        <span>Available repositories</span>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="rounded p-0.5 hover:text-[var(--color-fg)]"
+          aria-label="Close"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+      {candidates.map(c => (
+        <button
+          key={c.id}
+          type="button"
+          onClick={() => onAdd(c.id)}
+          className="flex w-full items-center gap-3 border-t border-[var(--color-border-soft)] px-3 py-2 text-left hover:bg-[var(--color-hover)]"
+        >
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13.5px] font-medium text-[var(--color-fg)]">{c.name}</div>
+            <div className="truncate font-mono text-[11.5px] text-[var(--color-fg-faint)]">{c.root_path}</div>
+          </div>
+          <span className="shrink-0 text-[11.5px] uppercase tracking-wider text-[var(--color-accent)] opacity-70">Add</span>
+        </button>
+      ))}
     </div>
   );
 }

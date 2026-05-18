@@ -4,7 +4,7 @@
 
 import { useApp } from "@/store/app";
 import { Button } from "@/components/ui/Button";
-import { ArrowLeft, Palette, FolderGit2, Settings as SettingsIcon, Keyboard, Terminal } from "lucide-react";
+import { ArrowLeft, Palette, FolderGit2, Settings as SettingsIcon, Keyboard, Terminal, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AppearanceSection } from "./AppearanceSection";
 import { RepositorySection } from "./RepositorySection";
@@ -54,19 +54,28 @@ export function Settings() {
         {projects.length === 0 && (
           <div className="px-3 py-2 text-[12.5px] text-[var(--color-fg-faint)]">No repositories yet.</div>
         )}
-        {projects.map(p => (
-          <RailItem
-            key={p.id}
-            label={p.name}
-            active={tab === "repositories" && repoId === p.id}
-            onClick={() => openSettings("repositories", p.id)}
-          />
-        ))}
+        {projects.map(p => {
+          const isMulti = (p.type ?? "single") === "multi";
+          return (
+            <RailItem
+              key={p.id}
+              // Multi-repo projects get the same Layers icon used in
+              // the main sidebar / breadcrumb, accent-tinted so it
+              // pops next to the muted RailItem label.
+              icon={isMulti
+                ? <Layers className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                : undefined}
+              label={p.name}
+              active={tab === "repositories" && repoId === p.id}
+              onClick={() => openSettings("repositories", p.id)}
+            />
+          );
+        })}
       </aside>
 
       {/* Right pane */}
       <section className="min-h-0 overflow-auto">
-        <div className="mx-auto max-w-3xl p-8 pt-14">
+        <div className="mx-auto max-w-5xl p-8 pt-14">
           {tab === "general"     && <GeneralSection />}
           {tab === "appearance"  && <AppearanceSection />}
           {tab === "agents"      && <AgentsSection />}

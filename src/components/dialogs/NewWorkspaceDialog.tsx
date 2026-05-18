@@ -11,10 +11,11 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
-import { workspaceCreate, settingsLoad } from "@/lib/ipc";
+import { workspaceCreate, workspaceCreateMulti, settingsLoad } from "@/lib/ipc";
 import { slugify, cn } from "@/lib/utils";
-import { Check, Loader2, AlertTriangle, Shield } from "lucide-react";
+import { Check, Loader2, AlertTriangle, Shield, Layers, GitBranch, Link2 } from "lucide-react";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
+import type { MemberMode } from "@/lib/types";
 
 const CLIS = ["claude", "gemini", "codex"] as const;
 const PREFIXES = ["feature", "hotfix", "__custom__"] as const;
@@ -44,6 +45,19 @@ export function NewWorkspaceDialog() {
   const [sbRw,    setSbRw]    = useState("");
   const [sbDeny,  setSbDeny]  = useState("");
   const [sbHosts, setSbHosts] = useState("");
+  // Multi-repo: per-member spec, indexed by member project id. Seeded
+  // when the dialog opens for a multi project from project.members.
+  // Per-member spec. Scripts are not per-workspace — they live on
+  // the multi-repo project itself and apply to every workspace under
+  // it. The dialog only collects mode + branch overrides here.
+  type MemberSpec = {
+    project_id: string;
+    mode: MemberMode;
+    branch: string;
+    base_branch: string;
+  };
+  const [members, setMembers] = useState<MemberSpec[]>([]);
+  const isMulti = (project?.type ?? "single") === "multi";
   const [busy, setBusy] = useState(false);
   // Ref guard against double-submit. React batches setBusy(true) so the
   // button's `disabled` only updates on the next render — but during a
@@ -89,17 +103,64 @@ export function NewWorkspaceDialog() {
     setSbRw((p?.sandbox_rw_paths ?? []).join("\n"));
     setSbDeny((p?.sandbox_deny_paths ?? []).join("\n"));
     setSbHosts((p?.sandbox_allowed_hosts ?? []).join("\n"));
+    // Seed the per-member spec (multi-repo only). Each member starts
+    // in Worktree mode on its own default branch — the simplest +
+    // safest default. User can flip per-member to Repo root or change
+    // branches before submit.
+    if ((p?.type ?? "single") === "multi") {
+      const all = useApp.getState().projects;
+      const seeded: MemberSpec[] = (p?.members ?? []).flatMap(pm => {
+        const m = all.find(x => x.id === pm.project_id);
+        if (!m) return [];
+        return [{
+          project_id: pm.project_id,
+          mode: "worktree" as MemberMode,
+          branch: "",
+          base_branch: m.base_branch || "",
+        }];
+      });
+      setMembers(seeded);
+    } else {
+      setMembers([]);
+    }
     settingsLoad().then(s => {
-      const merge = (g: string[] = [], pr: string[] = []) => {
+      const merge = (...lists: (string[] | undefined)[]) => {
         const seen = new Set<string>(); const out: string[] = [];
-        for (const v of [...g, ...pr]) {
-          if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+        for (const list of lists) {
+          for (const v of list ?? []) {
+            if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+          }
         }
         return out.join("\n");
       };
-      setSbRw(merge(s.sandbox_default_rw_paths,      p?.sandbox_rw_paths));
-      setSbDeny(merge(s.sandbox_default_deny_paths,  p?.sandbox_deny_paths));
-      setSbHosts(merge(s.sandbox_default_allowed_hosts, p?.sandbox_allowed_hosts));
+      // For multi-repo: union globals + host + every member project's
+      // sandbox lists. Same dedupe-preserving order as single-repo,
+      // just N+1 inputs instead of 2.
+      if ((p?.type ?? "single") === "multi") {
+        const all = useApp.getState().projects;
+        const memberLists = (p?.members ?? [])
+          .map(pm => all.find(x => x.id === pm.project_id))
+          .filter((x): x is NonNullable<typeof x> => !!x);
+        setSbRw(merge(
+          s.sandbox_default_rw_paths,
+          p?.sandbox_rw_paths,
+          ...memberLists.map(m => m.sandbox_rw_paths),
+        ));
+        setSbDeny(merge(
+          s.sandbox_default_deny_paths,
+          p?.sandbox_deny_paths,
+          ...memberLists.map(m => m.sandbox_deny_paths),
+        ));
+        setSbHosts(merge(
+          s.sandbox_default_allowed_hosts,
+          p?.sandbox_allowed_hosts,
+          ...memberLists.map(m => m.sandbox_allowed_hosts),
+        ));
+      } else {
+        setSbRw(merge(s.sandbox_default_rw_paths,      p?.sandbox_rw_paths));
+        setSbDeny(merge(s.sandbox_default_deny_paths,  p?.sandbox_deny_paths));
+        setSbHosts(merge(s.sandbox_default_allowed_hosts, p?.sandbox_allowed_hosts));
+      }
     }).catch(() => {});
     setPhase("form"); setSetupLog([]); setCreatedWsId(null);
     // CRITICAL: also reset `busy`. On a successful prior creation we
@@ -173,20 +234,44 @@ export function NewWorkspaceDialog() {
       // during typing don't roundtrip through the array state.
       const splitLines = (s: string) =>
         s.split("\n").map(l => l.trim()).filter(Boolean);
-      await workspaceCreate({
-        id: wsId,
-        project_id: projectId,
-        name: name.trim(),
-        cli,
-        base_branch: base.trim() || null,
-        branch: branch.trim(),
-        sandbox_enabled: sandbox,
-        // Only send lists when sandbox is on - keeps the JSON tidy
-        // for unsandboxed workspaces (they don't need these saved).
-        sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
-        sandbox_deny_paths:     sandbox ? splitLines(sbDeny)  : undefined,
-        sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
-      });
+      if (isMulti) {
+        await workspaceCreateMulti({
+          id: wsId,
+          project_id: projectId,
+          name: name.trim(),
+          cli,
+          base_branch: base.trim() || undefined,
+          branch: branch.trim(),
+          members: members.map(m => ({
+            project_id: m.project_id,
+            mode: m.mode,
+            // Worktree mode: blank branch falls back to the workspace's
+            // top-level branch on the Rust side. base falls back to
+            // the member project's own base. RepoRoot mode ignores both.
+            branch: m.mode === "worktree" ? (m.branch.trim() || undefined) : undefined,
+            base_branch: m.mode === "worktree" ? (m.base_branch.trim() || undefined) : undefined,
+          })),
+          sandbox_enabled: sandbox,
+          sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
+          sandbox_deny_paths:     sandbox ? splitLines(sbDeny)  : undefined,
+          sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+        });
+      } else {
+        await workspaceCreate({
+          id: wsId,
+          project_id: projectId,
+          name: name.trim(),
+          cli,
+          base_branch: base.trim() || null,
+          branch: branch.trim(),
+          sandbox_enabled: sandbox,
+          // Only send lists when sandbox is on - keeps the JSON tidy
+          // for unsandboxed workspaces (they don't need these saved).
+          sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
+          sandbox_deny_paths:     sandbox ? splitLines(sbDeny)  : undefined,
+          sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+        });
+      }
       await loadAll();
       setPhase("setup");
     } catch (e) {
@@ -204,7 +289,7 @@ export function NewWorkspaceDialog() {
       // for several seconds on big repos.
       open={!!projectId}
       onOpenChange={(v) => { if (!v && !busy) close(); }}
-      title="New worktree"
+      title={isMulti ? "New multi-repo workspace" : "New worktree"}
       description={project ? `in ${project.name}` : undefined}
       // Widen when sandbox is on so the sandbox form gets a 2nd column
       // instead of forcing the dialog to scroll. Narrow when off so the
@@ -283,9 +368,98 @@ export function NewWorkspaceDialog() {
           <Input value={branch} onChange={e => { setBranch(e.target.value); setBranchEdited(true); }} placeholder="feature/fix-login-bug" required />
         </Field>
 
-        <Field label="Branch from" hint="Blank = repo default.">
+        <Field label={isMulti ? "Host branch from" : "Branch from"} hint={isMulti ? "Blank = host repo default. Members fall back to their own defaults below." : "Blank = repo default."}>
           <Input value={base} onChange={e => setBase(e.target.value)} placeholder="origin/master" />
         </Field>
+
+        {/* Multi-repo: per-member mode + branch picker. Each member
+            row renders a small toggle (Worktree | Repo root) and, when
+            in Worktree mode, a branch + base override. RepoRoot mode
+            collapses to a single warning line. */}
+        {isMulti && (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <label className="text-[13px] font-medium text-[var(--color-fg)]">
+                Members ({members.length})
+              </label>
+              <span className="text-[11.5px] text-[var(--color-fg-faint)]">
+                Per-repo mode + branch
+              </span>
+            </div>
+            <div className="flex flex-col gap-2">
+              {members.map((m, idx) => {
+                const proj = useApp.getState().projects.find(p => p.id === m.project_id);
+                if (!proj) return null;
+                const update = (patch: Partial<MemberSpec>) =>
+                  setMembers(prev => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
+                return (
+                  <div
+                    key={m.project_id}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-[13px] font-medium text-[var(--color-fg)]">{proj.name}</div>
+                        <div className="truncate font-mono text-[11px] text-[var(--color-fg-faint)]">{proj.root_path}</div>
+                      </div>
+                      <div className="inline-flex shrink-0 items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg-1)] p-[2px] text-[11.5px]">
+                        <button
+                          type="button"
+                          onClick={() => update({ mode: "worktree" })}
+                          className={cn(
+                            "flex h-6 items-center gap-1 rounded-[4px] px-2 transition-colors",
+                            m.mode === "worktree"
+                              ? "bg-[var(--color-accent-deep)] text-white"
+                              : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
+                          )}
+                        >
+                          <GitBranch className="h-3 w-3" /> Worktree
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => update({ mode: "repo_root" })}
+                          className={cn(
+                            "flex h-6 items-center gap-1 rounded-[4px] px-2 transition-colors",
+                            m.mode === "repo_root"
+                              ? "bg-[var(--color-warn)] text-black"
+                              : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
+                          )}
+                        >
+                          <Link2 className="h-3 w-3" /> Repo root
+                        </button>
+                      </div>
+                    </div>
+                    {m.mode === "worktree" ? (
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <Input
+                          value={m.branch}
+                          onChange={e => update({ branch: e.target.value })}
+                          placeholder={branch || "(same as host branch)"}
+                        />
+                        <Input
+                          value={m.base_branch}
+                          onChange={e => update({ base_branch: e.target.value })}
+                          placeholder={proj.base_branch || "branch from…"}
+                        />
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-[11.5px] text-[var(--color-warn)]">
+                        Live symlink — agent edits land directly on your real checkout.
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {members.some(m => m.mode === "repo_root") && (
+              <div className="rounded-md border border-[var(--color-warn)]/40 bg-[var(--color-warn)]/10 px-3 py-2 text-[12px] text-[var(--color-warn)]">
+                <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+                One or more members are linked to live checkouts. The agent
+                can directly modify those repos — no worktree isolation.
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Sandbox panel - same shape as the Edit Sandbox dialog so
             users see one consistent control. Clickable whole-panel
@@ -472,3 +646,6 @@ function Field({ label, hint, children }: {
     </div>
   );
 }
+
+// Per-member script editor moved to NewProjectDialog / RepositorySection
+// — scripts are project-scoped, not workspace-scoped.

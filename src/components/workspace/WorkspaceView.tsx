@@ -9,7 +9,7 @@ import { lazy, Suspense, useEffect, useRef } from "react";
 import type { Workspace } from "@/lib/types";
 import { useApp, useWorkspaceTabs, useActiveTabId } from "@/store/app";
 import { TabBar } from "./TabBar";
-import { TerminalPane } from "./TerminalPane";
+import { TerminalPane, FooterBar } from "./TerminalPane";
 import { AuxTerminal } from "./AuxTerminal";
 import { X, Plus, TerminalSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -20,8 +20,8 @@ const DiffPane   = lazy(() => import("./DiffPane").then(m => ({ default: m.DiffP
 const DEFAULT_SPLIT_HEIGHT = 240;
 const MIN_HEIGHT = 80;
 
-function BottomTabPill({ title, active, canClose, onSelect, onClose }: {
-  title: string; active: boolean; canClose: boolean; onSelect: () => void; onClose: () => void;
+function BottomTabPill({ title, active, onSelect, onClose }: {
+  title: string; active: boolean; canClose?: boolean; onSelect: () => void; onClose: () => void;
 }) {
   // Geometry mirrors TabBar.tsx's TabPill: h-7 / rounded-md / text-[13.5px]
   // / h-4 icons. So the split-strip below the agent terminal feels like the
@@ -38,12 +38,14 @@ function BottomTabPill({ title, active, canClose, onSelect, onClose }: {
     >
       <TerminalSquare className="h-4 w-4 shrink-0 text-[var(--color-fg-faint)]" />
       <span className="truncate">{title}</span>
-      {canClose && (
-        <button
-          className="ml-0.5 rounded p-0.5 text-[var(--color-fg-faint)] opacity-0 hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)] group-hover:opacity-100"
-          onClick={(e) => { e.stopPropagation(); onClose(); }}
-        ><X className="h-3 w-3" /></button>
-      )}
+      {/* Close button always visible — closing the last shell tab
+          also collapses the split (handled by the store's
+          closeBottomTab → toggleSplit fallback if count hits 0). */}
+      <button
+        title="Close shell"
+        className="ml-0.5 rounded p-0.5 text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
+        onClick={(e) => { e.stopPropagation(); onClose(); }}
+      ><X className="h-3 w-3" /></button>
     </div>
   );
 }
@@ -95,6 +97,7 @@ export function WorkspaceView({ ws }: { ws: Workspace }) {
         {split && (
           <>
             <div
+              data-bottom-split=""
               className="relative shrink-0 flex-col bg-[var(--color-bg-1)] border-t border-[var(--color-border-soft)] flex"
               style={{ height: splitHeight }}
             >
@@ -145,13 +148,33 @@ export function WorkspaceView({ ws }: { ws: Workspace }) {
                     className="absolute inset-0"
                     style={{ visibility: t.id === activeBottom ? "visible" : "hidden", zIndex: t.id === activeBottom ? 1 : 0 }}
                   >
-                    <AuxTerminal wsPath={ws.path} active={t.id === activeBottom} />
+                    <AuxTerminal
+                      wsPath={ws.path}
+                      active={t.id === activeBottom}
+                      onExited={() => {
+                        closeBottomTab(ws.id, t.id);
+                        // The sibling that becomes active should pick up
+                        // focus — otherwise Ctrl+D'ing through shells
+                        // dumps focus to nowhere and the next shell looks
+                        // dead until clicked.
+                        setTimeout(() => {
+                          const split = document.querySelector("[data-bottom-split]");
+                          const el = split?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+                          el?.focus();
+                        }, 0);
+                      }}
+                    />
                   </div>
                 ))}
               </div>
             </div>
           </>
         )}
+        {/* Sandbox status row — hoisted out of TerminalPane so it
+            sits BELOW the bottom-split (when open) and stays the
+            visual bottom of the workspace regardless of which tab
+            type is active. Always rendered. */}
+        <FooterBar ws={ws} sandboxWarning={null} />
       </div>
     </div>
   );

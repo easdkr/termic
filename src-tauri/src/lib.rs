@@ -86,10 +86,54 @@ pub struct Project {
     /// `projects.json` rows written before multi-repo shipped.
     #[serde(default, rename = "type")]
     pub project_type: ProjectType,
-    /// Multi-repo members. Each entry references another Project's
-    /// `id`. Empty / ignored when `project_type == Single`.
-    #[serde(default)]
-    pub members: Vec<String>,
+    /// Multi-repo members. Each entry pins a reference to another
+    /// Project + the scripts to run for that member when used in
+    /// THIS multi-repo project. Scripts default-empty; when empty
+    /// they're treated as "skip". The member project's OWN scripts
+    /// (settable in its own Repository settings) are inherited as
+    /// the editor's placeholder, not the runtime value — multi-repo
+    /// projects opt into different commands than the standalone use
+    /// of the same repo. Empty / ignored when `project_type == Single`.
+    #[serde(default, deserialize_with = "deserialize_members")]
+    pub members: Vec<ProjectMember>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProjectMember {
+    pub project_id: String,
+    pub setup_script: String,
+    pub run_script: String,
+    pub archive_script: String,
+}
+
+// Backwards-compatible deserializer: accepts both the legacy
+// Vec<String> shape (member ids only) and the new Vec<ProjectMember>
+// shape, so projects.json written before scripts shipped still loads.
+fn deserialize_members<'de, D>(d: D) -> Result<Vec<ProjectMember>, D::Error>
+where D: serde::Deserializer<'de> {
+    use serde::de::{Visitor, SeqAccess};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Vec<ProjectMember>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("array of member ids or ProjectMember objects")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum Item { Id(String), Full(ProjectMember) }
+            let mut out = Vec::new();
+            while let Some(item) = seq.next_element::<Item>()? {
+                out.push(match item {
+                    Item::Id(id)  => ProjectMember { project_id: id, ..Default::default() },
+                    Item::Full(m) => m,
+                });
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(V)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -187,6 +231,23 @@ pub struct WorkspaceMember {
     /// RepoRoot mode = the project's `root_path`. Frozen here so the
     /// sandbox profile + file-tree code don't need to re-resolve.
     pub path: String,
+    /// Per-member port. Frozen at create. Exposed as $TERMIC_PORT
+    /// when this member's setup/run script fires so two members
+    /// running `PORT=$TERMIC_PORT npm run dev` in the same workspace
+    /// don't collide on the same listening port. Zero = legacy
+    /// workspace created before per-member ports existed; the
+    /// runner falls back to the workspace's own port in that case.
+    #[serde(default)]
+    pub port: u16,
+    /// Per-member script overrides. Frozen at creation from the
+    /// member project's own defaults; user can tweak in the New
+    /// workspace dialog. Run with `cwd = member.path`. Empty = the
+    /// member skips that script (so e.g. a docs repo can have no
+    /// setup / no run). Host's own scripts (project.setup_script /
+    /// run_script / archive_script) cover the wrapper's host worktree.
+    pub setup_script: String,
+    pub run_script: String,
+    pub archive_script: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -723,50 +784,113 @@ fn project_add(root_path: String) -> Result<Project, String> {
     Ok(p)
 }
 
-/// Create a multi-repo project. The `root_path` must be an existing
-/// git repo (the HOST repo — the one that holds shared CLAUDE.md /
-/// AGENTS.md / .claude/skills). `member_ids` references already-added
-/// Termic projects; members can be edited later via
-/// `project_set_members`. The host itself is NOT in the member list —
-/// it's implicit (it's the project record).
+/// Create a multi-repo project. `root_path` is the HOST repo — the
+/// git repo that owns shared CLAUDE.md / AGENTS.md / .claude/skills.
+/// It can be:
+///   - An existing path to a real git repo (most common: the user
+///     points at a knowledge repo they cloned from GitHub).
+///   - Empty — Termic auto-creates `~/termic/projects/<slug>/`,
+///     `git init`s it, and uses that as the host. Gives the user a
+///     usable multi-repo project even when they don't have a
+///     knowledge repo prepared. They can `git remote add` + push it
+///     to GitHub later.
+/// `name` is required (drives the host directory name in the
+/// auto-create case + the project's display label). `member_ids`
+/// reference already-added Termic projects.
 #[tauri::command]
-fn project_add_multi(root_path: String, member_ids: Vec<String>) -> Result<Project, String> {
-    // Same git-repo validation as project_add.
-    let trimmed = root_path.trim();
-    let expanded: String = if let Some(rest) = trimmed.strip_prefix("~/") {
-        dirs::home_dir().map(|h| h.join(rest).to_string_lossy().into_owned())
-            .unwrap_or_else(|| trimmed.to_string())
-    } else { trimmed.to_string() };
-    let pb = PathBuf::from(&expanded);
-    if !pb.exists() {
-        return Err(format!("{} does not exist", expanded));
+fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember>) -> Result<Project, String> {
+    let trimmed_path = root_path.trim();
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("project name is required".into());
     }
-    if git(&["rev-parse", "--git-dir"], &pb).is_err() {
-        return Err(format!("{} is not a git repo — multi-repo projects use the host as their persistent knowledge layer", expanded));
+    let slug = slugify(trimmed_name);
+    if slug.is_empty() {
+        return Err("project name must contain at least one alphanumeric character".into());
     }
+
+    // Resolve the host path. Two branches:
+    //   - user-supplied: expand ~, require existing git repo (same
+    //     validation as project_add).
+    //   - empty: Termic auto-creates ~/termic/projects/<slug>/ and
+    //     git-init's it. We pick the slug-derived path and refuse if
+    //     it already exists (avoid clobbering a previous attempt).
+    let pb: PathBuf = if trimmed_path.is_empty() {
+        let projects_root = dirs::home_dir()
+            .ok_or_else(|| "no home dir".to_string())?
+            .join("termic/projects");
+        fs::create_dir_all(&projects_root).map_err(|e| e.to_string())?;
+        let target = projects_root.join(&slug);
+        if target.exists() {
+            return Err(format!(
+                "{} already exists — pick a different name or remove the directory first",
+                target.display()
+            ));
+        }
+        fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+        // git init + an initial empty commit so worktrees can branch
+        // off something. A bare init has no HEAD ref, which breaks
+        // `git worktree add -b <branch>` later.
+        git(&["init", "-q"], &target).map_err(|e| format!("git init failed: {e}"))?;
+        // Configure a default branch name we can rely on.
+        let _ = git(&["symbolic-ref", "HEAD", "refs/heads/main"], &target);
+        // Seed a stub CLAUDE.md so the host has something to commit.
+        // Also gives the user an obvious place to start writing.
+        let claude_md = format!(
+            "# {}\n\nShared knowledge for the {} multi-repo project.\nThis file is loaded by every workspace under it.\n",
+            trimmed_name, trimmed_name,
+        );
+        fs::write(target.join("CLAUDE.md"), claude_md).map_err(|e| e.to_string())?;
+        // Allow commits without configured user.* for the initial
+        // bootstrap commit; -c sets the value just for this command.
+        git(
+            &["-c", "user.email=termic@local", "-c", "user.name=Termic",
+              "add", "CLAUDE.md"],
+            &target,
+        ).ok();
+        git(
+            &["-c", "user.email=termic@local", "-c", "user.name=Termic",
+              "commit", "-q", "-m", "init: termic multi-repo host"],
+            &target,
+        ).map_err(|e| format!("git commit failed: {e}"))?;
+        target
+    } else {
+        let expanded: String = if let Some(rest) = trimmed_path.strip_prefix("~/") {
+            dirs::home_dir().map(|h| h.join(rest).to_string_lossy().into_owned())
+                .unwrap_or_else(|| trimmed_path.to_string())
+        } else { trimmed_path.to_string() };
+        let pb = PathBuf::from(&expanded);
+        if !pb.exists() {
+            return Err(format!("{} does not exist", expanded));
+        }
+        if git(&["rev-parse", "--git-dir"], &pb).is_err() {
+            return Err(format!("{} is not a git repo", expanded));
+        }
+        pb
+    };
+
     let mut list = load_projects();
     let canon = fs::canonicalize(&pb).map_err(|e| e.to_string())?;
     if list.iter().any(|p| p.root_path == canon.to_string_lossy()) {
         return Err("a project at this path is already added".into());
     }
 
-    // Validate member references — fail fast if any id is unknown
-    // or points back at the host we're about to add.
+    // Validate member references — fail fast if any id is unknown.
     let mut seen: HashSet<String> = HashSet::new();
-    for mid in &member_ids {
-        if !seen.insert(mid.clone()) {
-            return Err(format!("duplicate member: {mid}"));
+    for m in &members {
+        if !seen.insert(m.project_id.clone()) {
+            return Err(format!("duplicate member: {}", m.project_id));
         }
-        if !list.iter().any(|p| &p.id == mid) {
-            return Err(format!("unknown member project id: {mid}"));
+        if !list.iter().any(|p| p.id == m.project_id) {
+            return Err(format!("unknown member project id: {}", m.project_id));
         }
     }
 
-    let name = canon.file_name().and_then(|s| s.to_str()).unwrap_or("repo").to_string();
     let base = detect_base_branch(&canon).unwrap_or_else(|_| "main".into());
     let remote = detect_default_remote(&canon);
     let ws_path = worktrees_base().map_err(|e| e.to_string())?
-        .join(&name).to_string_lossy().into_owned();
+        .join(&slug).to_string_lossy().into_owned();
+    let name = trimmed_name.to_string();
     let p = Project {
         id: Uuid::new_v4().to_string(),
         name,
@@ -788,36 +912,58 @@ fn project_add_multi(root_path: String, member_ids: Vec<String>) -> Result<Proje
         sandbox_deny_paths: Vec::new(),
         sandbox_allowed_hosts: Vec::new(),
         project_type: ProjectType::Multi,
-        members: member_ids,
+        members,
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
     Ok(p)
 }
 
-/// Edit a multi-repo project's member list post-create. No-op for
-/// single-repo projects (returns an error so the frontend surfaces it).
+/// Edit a multi-repo project's member list (with per-member scripts)
+/// post-create. Errors for single-repo projects.
 #[tauri::command]
-fn project_set_members(id: String, member_ids: Vec<String>) -> Result<(), String> {
+fn project_set_members(id: String, members: Vec<ProjectMember>) -> Result<(), String> {
     let mut list = load_projects();
     let host_exists = list.iter().any(|p| p.id == id);
     if !host_exists { return Err("no such project".into()); }
-    // Validate every member id resolves to a real project and isn't
-    // the host itself.
     let mut seen: HashSet<String> = HashSet::new();
-    for mid in &member_ids {
-        if mid == &id { return Err("a multi-repo project can't list itself as a member".into()); }
-        if !seen.insert(mid.clone()) { return Err(format!("duplicate member: {mid}")); }
-        if !list.iter().any(|p| &p.id == mid) {
-            return Err(format!("unknown member project id: {mid}"));
+    for m in &members {
+        if m.project_id == id { return Err("a multi-repo project can't list itself as a member".into()); }
+        if !seen.insert(m.project_id.clone()) { return Err(format!("duplicate member: {}", m.project_id)); }
+        if !list.iter().any(|p| p.id == m.project_id) {
+            return Err(format!("unknown member project id: {}", m.project_id));
         }
     }
     let p = list.iter_mut().find(|p| p.id == id).unwrap();
     if p.project_type != ProjectType::Multi {
         return Err("only multi-repo projects have a members list".into());
     }
-    p.members = member_ids;
+    p.members = members;
     save_projects(&list).map_err(|e| e.to_string())
+}
+
+/// Reorder the projects list to match the supplied id sequence.
+/// Any projects in storage not in `ids` get appended (preserves their
+/// existing relative order) so a partial reorder request can't lose
+/// data. Unknown ids are skipped. The disk order IS the render order
+/// (`projects_list` returns them as-is), so this is sufficient — no
+/// per-project sort_key field needed.
+#[tauri::command]
+fn project_reorder(ids: Vec<String>) -> Result<(), String> {
+    let mut list = load_projects();
+    let mut out: Vec<Project> = Vec::with_capacity(list.len());
+    let mut taken: HashSet<String> = HashSet::new();
+    for id in &ids {
+        if let Some(idx) = list.iter().position(|p| &p.id == id) {
+            out.push(list.remove(idx));
+            taken.insert(id.clone());
+        }
+    }
+    // Anything not named in `ids` gets appended in its original order.
+    for p in list {
+        if !taken.contains(&p.id) { out.push(p); }
+    }
+    save_projects(&out).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -898,6 +1044,69 @@ fn workspace_open_repo(project_id: String, cli: Option<String>) -> Result<Worksp
         return Ok(existing);
     }
     let port = 18100 + (load_workspaces().len() as u16);
+
+    // Multi-repo project opened in REPO mode: drop a symlink for
+    // each member into the host's working dir so the agent at the
+    // host root can navigate into them. Symlinks point at each
+    // member's live checkout (no worktree — REPO mode is the
+    // "everything live, no isolation" variant). Composition gets
+    // frozen on the workspace so sandbox + archive treat the symlinks
+    // as the workspace's responsibility. The host's .gitignore is
+    // updated with a managed block so the new dirs don't show up as
+    // untracked changes.
+    let projects = load_projects();
+    let mut composition: Vec<WorkspaceMember> = Vec::new();
+    if proj.project_type == ProjectType::Multi {
+        let host_dir = Path::new(&proj.root_path);
+        let mut dir_names: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        // Per-member port counter — same scheme as worktree-mode
+        // multi-repo: workspace.port + i + 1 so members can run
+        // PORT=$TERMIC_PORT npm run dev without colliding.
+        let mut next_member_port = port + 1;
+        for pm in &proj.members {
+            let Some(mp) = projects.iter().find(|p| p.id == pm.project_id) else { continue; };
+            let dir_name = mp.name.clone();
+            if dir_name.is_empty() || dir_name.contains('/') { continue; }
+            if !seen.insert(dir_name.clone()) { continue; }
+            let target = host_dir.join(&dir_name);
+            // If the link already exists from a previous open-repo,
+            // leave it alone; if a real file/dir collides, skip with
+            // a warning rather than clobbering user content.
+            if target.symlink_metadata().is_ok() {
+                let link_target = fs::read_link(&target).ok();
+                if link_target.map(|p| p.to_string_lossy().into_owned()) != Some(mp.root_path.clone()) {
+                    eprintln!("workspace_open_repo: {} exists and isn't our symlink; skipping {}", target.display(), mp.name);
+                    continue;
+                }
+            } else if let Err(e) = std::os::unix::fs::symlink(&mp.root_path, &target) {
+                eprintln!("workspace_open_repo: symlink {} failed: {e}", mp.name);
+                continue;
+            }
+            let member_port = next_member_port;
+            next_member_port = next_member_port.saturating_add(1);
+            composition.push(WorkspaceMember {
+                project_id: mp.id.clone(),
+                dir_name: dir_name.clone(),
+                mode: MemberMode::RepoRoot,
+                branch: String::new(),
+                path: mp.root_path.clone(),
+                port: member_port,
+                // Scripts come from the multi-repo project's per-
+                // member entry, NOT from the member project's own
+                // scripts. Multi-repo projects opt into different
+                // commands than standalone single-repo workspaces.
+                setup_script:   pm.setup_script.clone(),
+                run_script:     pm.run_script.clone(),
+                archive_script: pm.archive_script.clone(),
+            });
+            dir_names.push(dir_name);
+        }
+        // Don't error on gitignore write — host might be read-only or
+        // the user might prefer to track these. Non-fatal.
+        let _ = ensure_multirepo_gitignore(host_dir, &dir_names);
+    }
+
     let ws = Workspace {
         id: Uuid::new_v4().to_string(),
         project_id: proj.id.clone(),
@@ -924,7 +1133,7 @@ fn workspace_open_repo(project_id: String, cli: Option<String>) -> Result<Worksp
         sandbox_rw_paths: Vec::new(),
         sandbox_deny_paths: Vec::new(),
         sandbox_allowed_hosts: Vec::new(),
-        composition: Vec::new(),
+        composition,
     };
     save_workspace(&ws).map_err(|e| e.to_string())?;
     Ok(ws)
@@ -1159,7 +1368,7 @@ async fn workspace_create_multi(app: AppHandle, args: CreateMultiArgs) -> Result
         .map_err(|e| e.to_string())?
 }
 
-fn workspace_create_multi_sync(_app: AppHandle, args: CreateMultiArgs) -> Result<Workspace, String> {
+fn workspace_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Workspace, String> {
     let projects = load_projects();
     let host = projects.iter().find(|p| p.id == args.project_id)
         .ok_or("host project not found")?.clone();
@@ -1242,7 +1451,15 @@ fn workspace_create_multi_sync(_app: AppHandle, args: CreateMultiArgs) -> Result
     // can unwind a partial composition.
     let mut composition: Vec<WorkspaceMember> = Vec::new();
     let mut done: Vec<(Project, CreateMultiMember, String, MemberMode, String)> = Vec::new();
+    // Per-member port counter — each member gets workspace.port+i+1
+    // so two members running PORT=$TERMIC_PORT npm run dev don't
+    // collide. We bumped 'port' below already by load_workspaces().len()
+    // for the workspace itself; members live in the gap above it.
+    let ws_port = 18100 + (load_workspaces().len() as u16);
+    let mut next_member_port = ws_port + 1;
     for (mp, spec, dir_name) in frozen.into_iter() {
+        let member_port = next_member_port;
+        next_member_port = next_member_port.saturating_add(1);
         let target = wrapper.join(&dir_name);
         match spec.mode {
             MemberMode::RepoRoot => {
@@ -1250,12 +1467,22 @@ fn workspace_create_multi_sync(_app: AppHandle, args: CreateMultiArgs) -> Result
                     rollback(&done);
                     return Err(format!("symlink {dir_name}: {e}"));
                 }
+                // Scripts come from the MULTI-REPO PROJECT's
+                // per-member spec (host.members[i]), not from the
+                // member project's standalone scripts. This is the
+                // "different commands per multi-repo project" model.
+                let proj_scripts = host.members.iter()
+                    .find(|pm| pm.project_id == mp.id);
                 composition.push(WorkspaceMember {
                     project_id: mp.id.clone(),
                     dir_name: dir_name.clone(),
                     mode: MemberMode::RepoRoot,
                     branch: String::new(),
                     path: mp.root_path.clone(),
+                    port: member_port,
+                    setup_script:   proj_scripts.map(|s| s.setup_script.clone()).unwrap_or_default(),
+                    run_script:     proj_scripts.map(|s| s.run_script.clone()).unwrap_or_default(),
+                    archive_script: proj_scripts.map(|s| s.archive_script.clone()).unwrap_or_default(),
                 });
                 done.push((mp.clone(), spec, dir_name, MemberMode::RepoRoot, target.to_string_lossy().into_owned()));
             }
@@ -1277,12 +1504,18 @@ fn workspace_create_multi_sync(_app: AppHandle, args: CreateMultiArgs) -> Result
                     rollback(&done);
                     return Err(format!("member {dir_name} worktree add failed: {e}"));
                 }
+                let proj_scripts = host.members.iter()
+                    .find(|pm| pm.project_id == mp.id);
                 composition.push(WorkspaceMember {
                     project_id: mp.id.clone(),
                     dir_name: dir_name.clone(),
                     mode: MemberMode::Worktree,
                     branch: mbranch,
                     path: target.to_string_lossy().into_owned(),
+                    port: member_port,
+                    setup_script:   proj_scripts.map(|s| s.setup_script.clone()).unwrap_or_default(),
+                    run_script:     proj_scripts.map(|s| s.run_script.clone()).unwrap_or_default(),
+                    archive_script: proj_scripts.map(|s| s.archive_script.clone()).unwrap_or_default(),
                 });
                 done.push((mp.clone(), spec, dir_name, MemberMode::Worktree, target.to_string_lossy().into_owned()));
             }
@@ -1349,6 +1582,92 @@ fn workspace_create_multi_sync(_app: AppHandle, args: CreateMultiArgs) -> Result
         composition,
     };
     save_workspace(&ws).map_err(|e| e.to_string())?;
+
+    // Streamed setup: host's project.setup_script (cwd=wrapper)
+    // first, then each member's setup_script (cwd=member.path) in
+    // declared order. All lines emit on setup-output://<wsId> with
+    // a `[name] ` prefix so the dialog UI can render them inline
+    // without us inventing a multi-channel event topic. setup-done
+    // fires once with the aggregate success at the very end.
+    // Multi-repo: ONLY members have scripts. The host is a wrapper
+    // dir for CLAUDE.md / AGENTS.md / .claude/, never something the
+    // user wants to "run" — so we don't even peek at host.setup_script
+    // here. (Single-repo workspace_create_sync handles its own.)
+    // Tuple shape: (dir_name, script, cwd, port). Per-member port
+    // so setup scripts that listen (rare but possible — e.g. setup
+    // boots a docker compose stack on $TERMIC_PORT) don't collide
+    // across siblings. Legacy workspaces (port == 0) get the same
+    // workspace.port + i + 1 scheme retroactively.
+    let member_setups: Vec<(String, String, std::path::PathBuf, u16)> = ws.composition.iter()
+        .enumerate()
+        .filter_map(|(idx, m)| {
+            let s = m.setup_script.trim();
+            if s.is_empty() { None } else {
+                let p = if m.port == 0 { ws.port.saturating_add(idx as u16 + 1) } else { m.port };
+                Some((m.dir_name.clone(), m.setup_script.clone(), std::path::PathBuf::from(&m.path), p))
+            }
+        })
+        .collect();
+    if member_setups.is_empty() {
+        let _ = app.emit(&format!("setup-done://{}", ws.id),
+            serde_json::json!({ "code": 0, "success": true }));
+    } else {
+        let app2 = app.clone();
+        let ws_id = ws.id.clone();
+        let name = ws.name.clone();
+        thread::spawn(move || {
+            let run_one = |label: &str, script: &str, cwd: &Path, port: u16| -> bool {
+                use std::io::{BufRead, BufReader};
+                use std::process::Stdio;
+                let _ = app2.emit(&format!("setup-output://{}", ws_id),
+                    serde_json::json!({ "line": format!("[{label}] $ {script}") }));
+                let spawn_res = Command::new("bash")
+                    .arg("-lc").arg(script).current_dir(cwd)
+                    .env("TERMIC_PORT", port.to_string())
+                    .env("TERMIC_WORKSPACE_NAME", &name)
+                    .env("TERMIC_TASK", &name)
+                    .stdout(Stdio::piped()).stderr(Stdio::piped())
+                    .spawn();
+                let mut child = match spawn_res {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = app2.emit(&format!("setup-output://{}", ws_id),
+                            serde_json::json!({ "line": format!("[{label}] spawn error: {e}") }));
+                        return false;
+                    }
+                };
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let app_o = app2.clone(); let id_o = ws_id.clone(); let l_o = label.to_string();
+                let t_out = stdout.map(|s| thread::spawn(move || {
+                    for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
+                        let _ = app_o.emit(&format!("setup-output://{id_o}"),
+                            serde_json::json!({ "line": format!("[{l_o}] {line}") }));
+                    }
+                }));
+                let app_e = app2.clone(); let id_e = ws_id.clone(); let l_e = label.to_string();
+                let t_err = stderr.map(|s| thread::spawn(move || {
+                    for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
+                        let _ = app_e.emit(&format!("setup-output://{id_e}"),
+                            serde_json::json!({ "line": format!("[{l_e}] {line}") }));
+                    }
+                }));
+                let status = child.wait();
+                if let Some(t) = t_out { let _ = t.join(); }
+                if let Some(t) = t_err { let _ = t.join(); }
+                status.map(|s| s.success()).unwrap_or(false)
+            };
+
+            let mut ok = true;
+            for (label, script, cwd, port) in &member_setups {
+                if !ok { break; }
+                if !run_one(label, script, cwd, *port) { ok = false; }
+            }
+            let _ = app2.emit(&format!("setup-done://{}", ws_id),
+                serde_json::json!({ "code": if ok { 0 } else { 1 }, "success": ok }));
+        });
+    }
+
     Ok(ws)
 }
 
@@ -1747,7 +2066,18 @@ fn workspace_archive_sync(id: String) -> Result<(), String> {
         }
     }
 
-    if let Some(p) = &proj {
+    // Multi-repo workspaces: only members have scripts (host is a
+    // wrapper, not a thing you run). Members archive in REVERSE
+    // declared order — stack teardown convention (last started,
+    // first stopped). Single-repo workspaces: host's project
+    // archive_script fires (covers `npm run cleanup` etc).
+    if !w.composition.is_empty() {
+        for m in w.composition.iter().rev() {
+            if !m.archive_script.trim().is_empty() && Path::new(&m.path).exists() {
+                let _ = run_script(&m.archive_script, Path::new(&m.path), w.port, &w.name);
+            }
+        }
+    } else if let Some(p) = &proj {
         if !p.archive_script.trim().is_empty() {
             let _ = run_script(&p.archive_script, Path::new(&w.path), w.port, &w.name);
         }
@@ -1758,9 +2088,27 @@ fn workspace_archive_sync(id: String) -> Result<(), String> {
     // dance entirely. Archiving one just removes it from our list; the actual
     // repo on disk stays intact.
     if w.is_repo_root {
+        // Multi-repo project opened in REPO mode: workspace_open_repo
+        // dropped member symlinks into the host dir. Clean them up
+        // on archive so a re-open doesn't trip the "already exists,
+        // not our symlink" guard. We only remove entries that are
+        // STILL symlinks pointing where we expect — a user who
+        // replaced the link with real content keeps their work.
+        for m in &w.composition {
+            if m.mode != MemberMode::RepoRoot { continue; }
+            let link = Path::new(&w.path).join(&m.dir_name);
+            let Ok(meta) = link.symlink_metadata() else { continue; };
+            if !meta.file_type().is_symlink() { continue; }
+            let target = fs::read_link(&link).ok().map(|p| p.to_string_lossy().into_owned());
+            if target.as_deref() != Some(m.path.as_str()) { continue; }
+            if let Err(e) = fs::remove_file(&link) {
+                errs.push(format!("rm symlink {}: {e}", m.dir_name));
+            }
+        }
         w.archived = true;
         save_workspace(w).map_err(|e| e.to_string())?;
         delete_workspace_file(&id).map_err(|e| e.to_string())?;
+        if !errs.is_empty() { return Err(errs.join("; ")); }
         return Ok(());
     }
 
@@ -1991,26 +2339,118 @@ pub struct ChangedFile {
     pub path: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct WorkspaceChanges {
-    pub count: usize,
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct ChangeGroup {
+    /// Display name for the section header. Host = the project name;
+    /// member = its `dir_name`.
+    pub name: String,
+    /// Current branch (live `git branch --show-current`). Useful for
+    /// the per-member visibility ask — composition's frozen branch is
+    /// only the create-time value; this catches the agent checking
+    /// out something else inside the worktree.
+    pub branch: String,
+    /// "host" | "worktree" | "repo_root". The UI uses this to flag
+    /// repo_root (live) groups + to disable click-to-diff for them
+    /// (their files live outside the wrapper subtree, so the
+    /// safe_workspace_path check would reject them).
+    pub kind: String,
+    /// Absolute path to the group's root on disk (wrapper for host,
+    /// member subdir for member groups). Frontend only uses this for
+    /// "Open in Finder" affordances.
+    pub path: String,
+    /// File paths are prefixed with `<dir_name>/` for member groups
+    /// so they resolve under the wrapper root unchanged (clickable
+    /// for worktree-mode members because the canonical path stays
+    /// inside the wrapper subtree). Host group's paths stay
+    /// unprefixed.
     pub files: Vec<ChangedFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct WorkspaceChanges {
+    /// Total file count across all groups. UI badge.
+    pub count: usize,
+    /// Flat list of host-only files. Kept for back-compat with any
+    /// caller / UI bit that pre-dates the multi-repo split. New code
+    /// should iterate `groups` instead.
+    pub files: Vec<ChangedFile>,
+    /// Per-repo groups. Single-repo workspaces have one entry (host
+    /// only); multi-repo workspaces have one per composition member +
+    /// the host. Empty for repo-root workspaces (the user's living
+    /// repo — surfacing its uncommitted changes here would be noise).
+    pub groups: Vec<ChangeGroup>,
 }
 
 #[tauri::command]
 fn workspace_changes(id: String) -> Result<WorkspaceChanges, String> {
     let w = load_workspaces().into_iter().find(|w| w.id == id).ok_or("no ws")?;
-    let out = git(&["status", "--porcelain"], Path::new(&w.path))
+
+    // Parse `git status --porcelain` into our ChangedFile shape.
+    let parse = |out: &str| -> Vec<ChangedFile> {
+        let mut files = Vec::new();
+        for line in out.lines() {
+            if line.len() < 4 { continue; }
+            let status = line[..2].trim().to_string();
+            let path = line[3..].to_string();
+            files.push(ChangedFile { status, path });
+        }
+        files
+    };
+    let head = |p: &Path| -> String {
+        git(&["branch", "--show-current"], p)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    // Host group: always present. Run git status at the workspace
+    // path itself (= wrapper for multi, = worktree for single).
+    let host_out = git(&["status", "--porcelain"], Path::new(&w.path))
         .map_err(|e| e.to_string())?;
-    let mut files = Vec::new();
-    for line in out.lines() {
-        if line.len() < 4 { continue; }
-        // porcelain v1: "XY path"
-        let status = line[..2].trim().to_string();
-        let path = line[3..].to_string();
-        files.push(ChangedFile { status, path });
+    let host_files = parse(&host_out);
+    let host_name = load_projects().into_iter()
+        .find(|p| p.id == w.project_id)
+        .map(|p| p.name)
+        .unwrap_or_else(|| w.name.clone());
+    let host_group = ChangeGroup {
+        name: host_name,
+        branch: head(Path::new(&w.path)),
+        kind: "host".to_string(),
+        path: w.path.clone(),
+        files: host_files.clone(),
+    };
+
+    // Member groups: only for multi-repo workspaces. For each member,
+    // run git status in its dir (worktree mode → real worktree;
+    // repo_root → symlinked live checkout) and prefix file paths
+    // with `<dir_name>/` so they resolve correctly from the wrapper.
+    let mut groups = vec![host_group];
+    for m in &w.composition {
+        // For worktree-mode, member.path is the wrapper-subdir
+        // worktree. For repo_root, it's the live checkout (symlink
+        // target). Both have a valid .git so `git status` just works.
+        let member_path = Path::new(&m.path);
+        if !member_path.exists() { continue; }
+        let member_out = git(&["status", "--porcelain"], member_path)
+            .unwrap_or_default();
+        let mut member_files = parse(&member_out);
+        for f in &mut member_files {
+            f.path = format!("{}/{}", m.dir_name, f.path);
+        }
+        let kind = match m.mode {
+            MemberMode::Worktree => "worktree",
+            MemberMode::RepoRoot => "repo_root",
+        }.to_string();
+        groups.push(ChangeGroup {
+            name: m.dir_name.clone(),
+            branch: head(member_path),
+            kind,
+            path: m.path.clone(),
+            files: member_files,
+        });
     }
-    Ok(WorkspaceChanges { count: files.len(), files })
+
+    let count: usize = groups.iter().map(|g| g.files.len()).sum();
+    Ok(WorkspaceChanges { count, files: host_files, groups })
 }
 
 /// Resolve a renderer-supplied path against a workspace root and verify the
@@ -2351,38 +2791,86 @@ fn running_scripts_remove(key: &str) -> Option<i32> {
 /// SIGTERM'd before the new one starts so users can't accidentally fork
 /// multiple dev servers off the same project.
 #[tauri::command]
-fn workspace_run_script_stream(id: String, kind: String, app: tauri::AppHandle) -> Result<(), String> {
+// `member`: empty / unset = run the host script with cwd at the
+// workspace path (single-repo behavior; for multi-repo workspaces
+// this is the host worktree). Non-empty = run a composition member's
+// script with cwd inside that member's dir. The frontend resolves
+// the member by its frozen `dir_name`.
+fn workspace_run_script_stream(
+    id: String,
+    kind: String,
+    member: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
     let w = load_workspaces().into_iter().find(|w| w.id == id).ok_or("no such ws")?;
     let p = load_projects().into_iter().find(|p| p.id == w.project_id).ok_or("no proj")?;
-    let script = match kind.as_str() {
-        "setup" => p.setup_script,
-        "run"   => p.run_script,
-        other   => return Err(format!("unknown script kind: {other}")),
+    let member_dir = member.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+
+    // Resolve target: empty member = host, otherwise the named
+    // composition member. Each carries its own (script, cwd, port).
+    // Per-member port avoids `PORT=$TERMIC_PORT npm run dev`
+    // collisions when two members run in parallel. Members created
+    // before per-member ports existed (port == 0) fall back to the
+    // workspace's port.
+    let (script, cwd, target_port) = match &member_dir {
+        None => {
+            let s = match kind.as_str() {
+                "setup" => p.setup_script.clone(),
+                "run"   => p.run_script.clone(),
+                other   => return Err(format!("unknown script kind: {other}")),
+            };
+            (s, std::path::PathBuf::from(&w.path), w.port)
+        }
+        Some(dir) => {
+            let idx = w.composition.iter().position(|m| &m.dir_name == dir)
+                .ok_or_else(|| format!("no such member: {dir}"))?;
+            let m = &w.composition[idx];
+            let s = match kind.as_str() {
+                "setup" => m.setup_script.clone(),
+                "run"   => m.run_script.clone(),
+                other   => return Err(format!("unknown script kind: {other}")),
+            };
+            // Legacy migration: workspaces created before per-member
+            // ports existed have m.port == 0. Falling back to
+            // w.port would re-introduce the original collision. Use
+            // the same scheme workspace_create_multi_sync uses now —
+            // workspace.port + index + 1 — so existing workspaces get
+            // unique ports without needing to be recreated.
+            let p = if m.port == 0 { w.port.saturating_add(idx as u16 + 1) } else { m.port };
+            (s, std::path::PathBuf::from(&m.path), p)
+        }
     };
-    let map_key = format!("{id}:{kind}");
+
+    // Event-channel topic + RUNNING_SCRIPTS key include the member
+    // dir so multiple members can run in parallel without colliding.
+    // Host uses an empty member component for back-compat.
+    let topic_member = member_dir.clone().unwrap_or_default();
+    let map_key = format!("{id}:{topic_member}:{kind}");
+    let emit_done = format!("script-done://{id}:{topic_member}:{kind}");
+    let emit_out  = format!("script-output://{id}:{topic_member}:{kind}");
 
     // Empty script → no-op but emit done so the UI doesn't spin forever.
     if script.trim().is_empty() {
-        let _ = app.emit(&format!("script-done://{map_key}"),
+        let _ = app.emit(&emit_done,
             serde_json::json!({ "code": 0, "success": true }));
         return Ok(());
     }
 
-    // Kill any prior instance for (ws, kind) — sends SIGTERM to the whole
-    // process group so children (npm → node, cargo → rustc, etc.) die too.
+    // Kill any prior instance for (ws, member, kind) — sends SIGTERM
+    // to the whole process group so children die too.
     if let Some(prev) = running_scripts_remove(&map_key) {
         unsafe { libc::kill(-prev, libc::SIGTERM); }
     }
 
-    let cwd  = std::path::PathBuf::from(&w.path);
-    let port = w.port;
+    let port = target_port;
     let name = w.name.clone();
-    let id_o = id.clone();
-    let kind_o = kind.clone();
+    let map_key_o = map_key.clone();
+    let emit_out_o = emit_out.clone();
+    let emit_done_o = emit_done.clone();
     let app_o = app.clone();
 
     thread::spawn(move || {
@@ -2405,26 +2893,25 @@ fn workspace_run_script_stream(id: String, kind: String, app: tauri::AppHandle) 
         let mut child = match spawn_res {
             Ok(c) => c,
             Err(e) => {
-                let _ = app_o.emit(&format!("script-output://{id_o}:{kind_o}"),
+                let _ = app_o.emit(&emit_out_o,
                     serde_json::json!({ "line": format!("[spawn error] {e}") }));
-                let _ = app_o.emit(&format!("script-done://{id_o}:{kind_o}"),
+                let _ = app_o.emit(&emit_done_o,
                     serde_json::json!({ "code": serde_json::Value::Null, "success": false }));
                 return;
             }
         };
         let pid = child.id() as i32;
-        running_scripts_insert(format!("{id_o}:{kind_o}"), pid);
+        running_scripts_insert(map_key_o.clone(), pid);
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let emit_ch = format!("script-output://{id_o}:{kind_o}");
-        let app1 = app_o.clone(); let ch1 = emit_ch.clone();
+        let app1 = app_o.clone(); let ch1 = emit_out_o.clone();
         let t_out = stdout.map(|s| thread::spawn(move || {
             for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
                 let _ = app1.emit(&ch1, serde_json::json!({ "line": line }));
             }
         }));
-        let app2 = app_o.clone(); let ch2 = emit_ch.clone();
+        let app2 = app_o.clone(); let ch2 = emit_out_o.clone();
         let t_err = stderr.map(|s| thread::spawn(move || {
             for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
                 let _ = app2.emit(&ch2, serde_json::json!({ "line": line }));
@@ -2433,21 +2920,24 @@ fn workspace_run_script_stream(id: String, kind: String, app: tauri::AppHandle) 
         let status = child.wait();
         if let Some(t) = t_out { let _ = t.join(); }
         if let Some(t) = t_err { let _ = t.join(); }
-        running_scripts_remove(&format!("{id_o}:{kind_o}"));
+        running_scripts_remove(&map_key_o);
         let code = status.as_ref().ok().and_then(|s| s.code());
         let success = status.map(|s| s.success()).unwrap_or(false);
-        let _ = app_o.emit(&format!("script-done://{id_o}:{kind_o}"),
+        let _ = app_o.emit(&emit_done_o,
             serde_json::json!({ "code": code, "success": success }));
     });
     Ok(())
 }
 
-/// SIGTERM the process group for (ws_id, kind). No-op if nothing's running.
-/// Caller should still wait for the matching `script-done` event before
-/// updating UI state — kill is async from the child's perspective.
+/// SIGTERM the process group for (ws_id, member, kind). No-op if
+/// nothing's running. `member` is the composition member's dir_name
+/// (empty / unset = host). Caller should still wait for the matching
+/// `script-done` event before updating UI state — kill is async from
+/// the child's perspective.
 #[tauri::command]
-fn workspace_stop_script(id: String, kind: String) -> Result<(), String> {
-    let map_key = format!("{id}:{kind}");
+fn workspace_stop_script(id: String, kind: String, member: Option<String>) -> Result<(), String> {
+    let member_dir = member.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let map_key = format!("{id}:{}:{kind}", member_dir.unwrap_or_default());
     if let Some(pid) = running_scripts_remove(&map_key) {
         unsafe { libc::kill(-pid, libc::SIGTERM); }
     }
@@ -2896,7 +3386,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove,
+            projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder,
             workspaces_list, workspace_create, workspace_create_multi, workspace_open_repo, workspace_archive, workspace_set_cli, workspace_set_sandbox,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, workspace_sandbox_add_allowed_host, workspace_sandbox_add_allowed_path, workspace_recent_denials, workspace_test_sandbox,
             workspace_delete, workspace_run_script, workspace_run_script_stream, workspace_stop_script, workspace_record_spawn, workspace_set_has_history,
@@ -2964,4 +3454,58 @@ fn position_on_cursor_monitor(win: &tauri::WebviewWindow) -> Result<(), Box<dyn 
     let y = p.y + (s.height as i32 - win_size.height as i32) / 2;
     win.set_position(tauri::PhysicalPosition::new(x, y))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn gitignore_inserts_managed_block_when_absent() {
+        let dir = tempdir().unwrap();
+        ensure_multirepo_gitignore(dir.path(), &["backend".into(), "frontend".into()]).unwrap();
+        let s = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(s.contains("# ── termic: multi-repo member dirs (managed) ──"));
+        assert!(s.contains("/backend"));
+        assert!(s.contains("/frontend"));
+        assert!(s.contains("# ── /termic ──"));
+    }
+
+    #[test]
+    fn gitignore_preserves_user_content_outside_block() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "node_modules\n*.log\n").unwrap();
+        ensure_multirepo_gitignore(dir.path(), &["backend".into()]).unwrap();
+        let s = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(s.contains("node_modules"));
+        assert!(s.contains("*.log"));
+        assert!(s.contains("/backend"));
+    }
+
+    #[test]
+    fn gitignore_rewrites_block_on_member_change() {
+        let dir = tempdir().unwrap();
+        ensure_multirepo_gitignore(dir.path(), &["a".into(), "b".into()]).unwrap();
+        ensure_multirepo_gitignore(dir.path(), &["a".into(), "c".into()]).unwrap();
+        let s = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(s.contains("/a"));
+        assert!(!s.contains("/b"));   // old member removed
+        assert!(s.contains("/c"));    // new member added
+        // Only one managed block (no double-fenced output).
+        assert_eq!(s.matches("# ── termic: multi-repo member dirs (managed) ──").count(), 1);
+    }
+
+    #[test]
+    fn gitignore_preserves_user_content_across_rewrites() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "secrets.env\n").unwrap();
+        ensure_multirepo_gitignore(dir.path(), &["x".into()]).unwrap();
+        ensure_multirepo_gitignore(dir.path(), &["y".into()]).unwrap();
+        let s = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(s.contains("secrets.env"));
+        assert!(s.contains("/y"));
+        assert!(!s.contains("/x"));
+    }
 }

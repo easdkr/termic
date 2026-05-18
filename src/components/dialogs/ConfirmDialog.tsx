@@ -35,6 +35,12 @@ export function ConfirmDialog() {
       open
       onOpenChange={(v) => { if (!v) resolve(false); }}
       title={req.title}
+      // The dialog this confirm stacks on top of (Sandbox dialog,
+      // Archive flow, etc.) already painted the dim backdrop. A
+      // second 65% black on top double-dims the screen + the
+      // independent fade-in animations compose into visible flicker.
+      // Transparent overlay = clean stack.
+      overlayClassName="bg-transparent"
     >
       <div className="flex items-start gap-3 pt-1">
         <AlertTriangle

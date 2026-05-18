@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  Project, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
+  Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   CliInfo, ChangeFile, Changes, FileEntry, Agent,
 } from "./types";
 
@@ -13,12 +13,13 @@ import type {
 
 export const projectsList   = () => invoke<Project[]>("projects_list");
 export const projectAdd     = (rootPath: string) => invoke<Project>("project_add", { rootPath });
-export const projectAddMulti = (rootPath: string, memberIds: string[]) =>
-  invoke<Project>("project_add_multi", { rootPath, memberIds });
-export const projectSetMembers = (id: string, memberIds: string[]) =>
-  invoke<void>("project_set_members", { id, memberIds });
+export const projectAddMulti = (rootPath: string, name: string, members: ProjectMember[]) =>
+  invoke<Project>("project_add_multi", { rootPath, name, members });
+export const projectSetMembers = (id: string, members: ProjectMember[]) =>
+  invoke<void>("project_set_members", { id, members });
 export const projectUpdate  = (p: Project) => invoke<void>("project_update", { p });
 export const projectRemove  = (id: string) => invoke<void>("project_remove", { id });
+export const projectReorder = (ids: string[]) => invoke<void>("project_reorder", { ids });
 export const projectRename  = (id: string, name: string) => invoke<void>("project_rename", { id, name });
 
 // ───────────────────────────── workspaces ─────────────────────────────
@@ -138,12 +139,15 @@ export const workspaceDirList  = (id: string, rel: string) => invoke<FileEntry[]
 export const workspaceChanges  = (id: string) => invoke<Changes>("workspace_changes", { id });
 export const workspaceRunScript= (id: string, which: "setup" | "run" = "run") =>
   invoke<string>("workspace_run_script", { id, which });
-/** Kick off a streaming run; subscribe to `script-output://<id>:<kind>` for
- *  per-line stdout/stderr and `script-done://<id>:<kind>` for completion. */
-export const workspaceRunScriptStream = (id: string, kind: "setup" | "run") =>
-  invoke<void>("workspace_run_script_stream", { id, kind });
-export const workspaceStopScript = (id: string, kind: "setup" | "run") =>
-  invoke<void>("workspace_stop_script", { id, kind });
+/** Kick off a streaming run. Subscribe to:
+ *    `script-output://<id>:<member>:<kind>`  (per-line stdout/stderr)
+ *    `script-done://<id>:<member>:<kind>`    (completion)
+ *  where `<member>` is empty for the host (single-repo + multi-host
+ *  scripts) or the composition member's `dir_name`. */
+export const workspaceRunScriptStream = (id: string, kind: "setup" | "run", member?: string) =>
+  invoke<void>("workspace_run_script_stream", { id, kind, member: member ?? null });
+export const workspaceStopScript = (id: string, kind: "setup" | "run", member?: string) =>
+  invoke<void>("workspace_stop_script", { id, kind, member: member ?? null });
 
 // ───────────────────────────── ptys ─────────────────────────────
 

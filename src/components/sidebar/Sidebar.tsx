@@ -6,13 +6,13 @@ import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
-import { LayoutGrid, History, RefreshCw, FolderPlus, Settings, Plus, Archive, Moon, Cog, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Check, Bug, Mail, Shield } from "lucide-react";
+import { LayoutGrid, History, RefreshCw, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Check, Bug, Mail, Shield } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu } from "@/components/ui/Dropdown";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { useUI } from "@/store/ui";
 import { cn } from "@/lib/utils";
-import { workspaceRename, projectRename, workspaceArchive, workspaceOpenRepo, openPath } from "@/lib/ipc";
+import { workspaceRename, projectRename, workspaceArchive, workspaceOpenRepo, openPath, projectReorder } from "@/lib/ipc";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 
 export function Sidebar() {
@@ -67,6 +67,87 @@ export function Sidebar() {
   // visually "hovered" (bg + Cog visible) while the menu is open;
   // otherwise the menu trigger looks like it un-selected its parent.
   const [menuOpenProjectId, setMenuOpenProjectId] = useState<string | null>(null);
+  // Drag-to-reorder PROJECTS. Pointer-event based (WKWebView's HTML5
+  // DnD is unreliable in Tauri). The row physically moves during the
+  // drag — we mutate the live `projects` order in the app store on
+  // every pointermove, so the item being dragged actually shifts
+  // past siblings instead of just showing a drop-target ring.
+  //
+  // CRITICAL: pointermove + pointerup listeners go on `document`,
+  // NOT the per-row React element. When the array reorders mid-drag,
+  // React detaches + reattaches the moved DOM node, which kills any
+  // pointer capture held on it — subsequent moves fire on whatever
+  // element sits under the cursor, and per-row handlers bail because
+  // they check `armed.id !== p.id`. Document-level listeners survive
+  // every reorder.
+  //
+  // Flow:
+  //   onPointerDown (per-row) → arm dragArmed.current + add document
+  //     pointermove/pointerup listeners
+  //   document pointermove past 4px → enter dragging
+  //   document pointermove while dragging → hit-test, splice store
+  //   document pointerup → IPC project_reorder + clean up listeners
+  const [dragProjectId, setDragProjectId] = useState<string | null>(null);
+  const dragArmed = useRef<{ id: string; x: number; y: number; started: boolean } | null>(null);
+  const dragListenersRef = useRef<{ move: (e: PointerEvent) => void; up: (e: PointerEvent) => void } | null>(null);
+
+  // Tear-down helper, used by both pointerup and pointercancel.
+  const endDrag = (commit: boolean) => {
+    const ls = dragListenersRef.current;
+    if (ls) {
+      document.removeEventListener("pointermove", ls.move);
+      document.removeEventListener("pointerup", ls.up);
+      document.removeEventListener("pointercancel", ls.up);
+      dragListenersRef.current = null;
+    }
+    const wasStarted = dragArmed.current?.started ?? false;
+    dragArmed.current = null;
+    setDragProjectId(null);
+    if (commit && wasStarted) {
+      const finalIds = useApp.getState().projects.map(x => x.id);
+      projectReorder(finalIds).catch(() => { void useApp.getState().loadAll(); });
+    }
+  };
+
+  // Single shared pointermove handler — keyed off armed.id (the
+  // dragged project) rather than any per-row closure. Survives the
+  // dragged element being reparented during reorder.
+  const onDragPointerMove = (e: PointerEvent) => {
+    const armed = dragArmed.current;
+    if (!armed) return;
+    if (!armed.started) {
+      const dx = e.clientX - armed.x;
+      const dy = e.clientY - armed.y;
+      if (dx * dx + dy * dy < 16) return;
+      armed.started = true;
+      setDragProjectId(armed.id);
+    }
+    const dragId = armed.id;
+    const all = useApp.getState().projects;
+    const fromIdx = all.findIndex(x => x.id === dragId);
+    if (fromIdx === -1) return;
+    const others = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-project-id]'),
+    ).filter(el => el.dataset.projectId !== dragId);
+    let beforeId: string | null = null;
+    for (const el of others) {
+      const r = el.getBoundingClientRect();
+      if (e.clientY < (r.top + r.bottom) / 2) {
+        beforeId = el.dataset.projectId ?? null;
+        break;
+      }
+    }
+    const nextIds = all.map(x => x.id).filter(id => id !== dragId);
+    const insertAt = beforeId
+      ? nextIds.findIndex(id => id === beforeId)
+      : nextIds.length;
+    const targetIdx = insertAt === -1 ? nextIds.length : insertAt;
+    if (targetIdx === fromIdx) return;
+    nextIds.splice(targetIdx, 0, dragId);
+    useApp.setState(s => ({
+      projects: nextIds.map(id => s.projects.find(x => x.id === id)!).filter(Boolean),
+    }));
+  };
 
   async function commitRename() {
     if (!renaming) return;
@@ -121,22 +202,66 @@ export function Sidebar() {
             const explicit = collapsedProjects[p.id];
             const collapsed = explicit !== undefined ? explicit : wsList.length === 0;
             return (
-              <div key={p.id}>
+              <div
+                key={p.id}
+                className="rounded-md"
+              >
                 <Tip content={compact ? p.name : ""}>
                   <div
-                    // Single-click toggles collapse. Double-click rename was
-                    // removed — too easy to fire by accident while clicking
-                    // fast to collapse/expand. Rename lives in
-                    // Settings → Repositories instead.
-                    onClick={() => setProjectCollapsed(p.id, !collapsed)}
+                    // data-project-id lives on the HEADER (not the
+                    // wrapper) because the wrapper includes all the
+                    // nested workspace rows — its bounding rect can
+                    // be 6× the header's height, putting the midpoint
+                    // far below the visible row. Hit-testing against
+                    // headers means the cursor only has to traverse
+                    // a single header's height to trigger a swap,
+                    // matching what the user sees.
+                    data-project-id={p.id}
+                    // Project header is the drag handle. Pointer-down
+                    // arms it (doesn't commit to "we're dragging" yet);
+                    // a pointer-move past the threshold flips into
+                    // dragging mode. Plain click → collapse toggle
+                    // still fires because pointerup before threshold
+                    // hits the click path normally.
+                    onPointerDown={(e) => {
+                      if (compact) return;
+                      if (e.button !== 0) return;
+                      const target = e.target as HTMLElement;
+                      if (target.closest('button, input, a, [data-no-drag]')) return;
+                      dragArmed.current = { id: p.id, x: e.clientX, y: e.clientY, started: false };
+                      // Attach document-level listeners so drag
+                      // tracking survives the dragged DOM node being
+                      // reparented mid-drag (React reorders kill
+                      // element-level pointer capture).
+                      const onUp = (ev: PointerEvent) => {
+                        const armed = dragArmed.current;
+                        const wasStarted = armed?.started ?? false;
+                        endDrag(true);
+                        // Plain click (no drag past threshold) →
+                        // toggle collapse, matching the original
+                        // header onClick behavior we replaced.
+                        if (armed && !wasStarted && ev.target instanceof Node) {
+                          // Only fire collapse if pointerup is still
+                          // over the same project header — same as a
+                          // real click would behave.
+                          const header = (ev.target as HTMLElement).closest('[data-project-id]') as HTMLElement | null;
+                          if (header?.dataset.projectId === p.id) {
+                            setProjectCollapsed(p.id, !collapsed);
+                          }
+                        }
+                      };
+                      dragListenersRef.current = { move: onDragPointerMove, up: onUp };
+                      document.addEventListener("pointermove", onDragPointerMove);
+                      document.addEventListener("pointerup", onUp);
+                      document.addEventListener("pointercancel", onUp);
+                    }}
                     className={cn(
                       "group flex items-center justify-between rounded-md font-mono text-[12.5px] font-extrabold uppercase tracking-[0.06em] text-[var(--color-fg)] hover:bg-[var(--color-hover)] cursor-pointer transition-colors",
-                      // Keep the row visually "hovered" while its `+`
-                      // dropdown is open so the row doesn't appear to
-                      // un-select underneath the menu. Same treatment
-                      // as the Cog button's data-[state=open] below.
                       menuOpenProjectId === p.id && "bg-[var(--color-hover)]",
                       compact ? "px-0 py-1 justify-center" : "px-2 py-1.5",
+                      // Accent-tinted while being dragged so it pops
+                      // visually as the user moves it through the list.
+                      dragProjectId === p.id && "bg-[var(--color-accent)]/15 text-[var(--color-accent)]",
                     )}
                   >
                     {compact ? (
@@ -153,6 +278,17 @@ export function Sidebar() {
                             ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
                             : <ChevronDown  className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
                           }
+                          {/* Multi-repo projects get a Layers icon next
+                              to their name so they're visually
+                              distinguishable from regular single-repo
+                              projects. The icon uses the accent color
+                              so it pops at the typography weight
+                              everything else in the row sits at. */}
+                          {(p.type ?? "single") === "multi" && (
+                            <Tip content="Multi-repo project">
+                              <Layers className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
+                            </Tip>
+                          )}
                           {renaming && renaming.kind === "proj" && renaming.id === p.id ? (
                             <input
                               autoFocus
@@ -378,7 +514,7 @@ export function Sidebar() {
                                   reads as a state suffix, not a leading
                                   control between the icon and the name. */}
                               {asleep && (
-                                <Tip content="Asleep — click the workspace to wake it">
+                                <Tip content="Asleep — click to relaunch">
                                   <span className="shrink-0 text-[var(--color-fg-faint)] opacity-60">
                                     <Moon className="h-3.5 w-3.5" />
                                   </span>
@@ -416,6 +552,8 @@ export function Sidebar() {
                                     // contents really are removed).
                                     message: w.is_repo_root
                                       ? "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched — you can re-open it any time. Any agent running here will be terminated."
+                                      : (w.composition?.length ?? 0) > 0
+                                      ? `Branches stay in git — you can recreate the workspace later. This removes: the host worktree + every member worktree (${w.composition!.filter(m => m.mode === "worktree").map(m => m.dir_name).join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`
                                       : "The branch stays in git — you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
                                     confirmLabel: w.is_repo_root ? "Remove entry" : "Archive",
                                     destructive: true,

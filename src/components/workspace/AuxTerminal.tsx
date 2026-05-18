@@ -17,7 +17,7 @@ import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg 
 // `currentTerminalTheme()` picks the matching palette at mount; the
 // themeMode effect below pushes updates into live instances.
 
-export function AuxTerminal({ wsPath, active }: { wsPath: string; active: boolean }) {
+export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; active: boolean; onExited?: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef  = useRef<FitAddon | null>(null);
@@ -85,10 +85,13 @@ export function AuxTerminal({ wsPath, active }: { wsPath: string; active: boolea
         ptyRef.current = ptyId;
         unlistenData = await ipc.onPtyData(ptyId, u8 => term.write(u8));
         unlistenExit = await ipc.onPtyExit(ptyId, () => {
-          // Surface a CTA so the user can spawn a fresh shell without leaving
-          // the panel. We don't auto-respawn — exiting is often intentional.
           ptyRef.current = null;
-          setExited(true);
+          // Bottom-split shells: parent passes onExited to close the
+          // tab immediately (the tab strip is the affordance for
+          // spawning a new one). Standalone previews keep the
+          // "New shell" CTA overlay.
+          if (onExited) onExited();
+          else setExited(true);
         });
         term.onData(d => ipc.ptyWrite(ptyId, Array.from(new TextEncoder().encode(d))).catch(() => {}));
         term.onResize(({ cols, rows }) => ipc.ptyResize(ptyId, rows, cols).catch(() => {}));

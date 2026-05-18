@@ -22,7 +22,11 @@ export function DiffPane({ ws, tab }: { ws: Workspace; tab: DiffTab }) {
   }, [ws.id, tab.path]);
 
   return (
-    <div className="flex h-full flex-col">
+    // bg MUST be opaque: tab swap keeps the codex/claude terminal
+    // mounted under us via visibility-toggle, and xterm's WebGL
+    // canvas (per-line bg here is alpha rgba) bleeds through any
+    // transparent ancestor. Solid color-bg seals the layer.
+    <div className="flex h-full flex-col bg-[var(--color-bg)]">
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-3">
         <span className="font-mono text-[12.5px] text-[var(--color-fg-dim)] truncate">{tab.path}</span>
         <div className="flex gap-1">

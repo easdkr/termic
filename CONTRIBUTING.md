@@ -178,10 +178,22 @@ See [CLAUDE.md](./CLAUDE.md) §"Releasing" for the rotation procedure.
 
 ---
 
-## License
+## License & Contributor Agreement
 
-By contributing, you agree your contributions will be licensed under
-[AGPL-3.0-or-later](./LICENSE), the same license as the project.
+Termic is released under [AGPL-3.0-or-later](./LICENSE), and every
+contribution becomes part of the Project under that license.
+
+In addition, by submitting a pull request you agree to the
+[Termic Contributor License Agreement](./CLA.md). The CLA grants the
+maintainer the right to relicense contributions under other terms in
+the future (for example, to offer a commercial license to companies
+that cannot accept AGPL obligations). Your contribution will always
+remain available under AGPL-3.0-or-later in the public project; the CLA
+only adds the option to also offer it under other terms.
+
+Signing is one-click via the [CLA Assistant](https://cla-assistant.io/)
+bot, which will comment on your first pull request. See [CLA.md](./CLA.md)
+for the full text and the manual-sign fallback.
 
 ---
 

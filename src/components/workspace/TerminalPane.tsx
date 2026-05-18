@@ -417,16 +417,12 @@ export function TerminalPane({ ws, tab, active }: Props) {
   return (
     <div className="relative flex h-full w-full flex-col">
       <div ref={hostRef} className="min-h-0 flex-1 bg-[var(--color-bg)]" />
-      {/* Status bar — ALWAYS visible. Left chunk: sandbox status
-          (click → open Sandbox dialog). Right chunk: +Terminal that
-          opens the bottom split. Hidden when the split is already
-          open (no point offering to add what's already there). The
-          row is a flex div with two click targets, not one giant
-          button, because each half has its own action.
-          Bg MUST be fully opaque — alpha lets xterm's last-rendered
-          glyphs bleed through, producing what looks like doubled
-          text ("02extrahosts" instead of "0 extra hosts"). */}
-      <FooterBar ws={ws} sandboxWarning={sandboxWarning} />
+      {/* Sandbox status footer was here — moved up to WorkspaceView
+          so it sits BELOW the bottom-split (when open) and stays the
+          visual bottom of the workspace, not the agent tab. The
+          degraded-warning string isn't plumbed across that boundary
+          yet (rare case); plumb through useUI later if it matters. */}
+      {void sandboxWarning}
       {exited && (
         // Overlay on the dead xterm. The terminal underneath stays mounted
         // so the user can still scroll through whatever the agent printed
@@ -446,7 +442,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
   );
 }
 
-function FooterBar({ ws, sandboxWarning }: {
+export function FooterBar({ ws, sandboxWarning }: {
   ws: { id: string; sandbox_enabled?: boolean; sandbox_allowed_hosts?: string[]; sandbox_rw_paths?: string[] };
   sandboxWarning: string | null;
 }) {

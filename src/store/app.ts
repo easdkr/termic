@@ -291,6 +291,15 @@ export const useApp = create<AppState>((set, get) => ({
     const next = list.filter(t => t.id !== tabId);
     let active = s.activeBottomTab[wsId];
     if (active === tabId) active = next[Math.max(0, idx - 1)]?.id || next[0]?.id || "";
+    // Last shell closed → collapse the split entirely so the user
+    // isn't left staring at an empty terminal pane.
+    if (next.length === 0) {
+      return {
+        bottomTabs:      { ...s.bottomTabs, [wsId]: next },
+        activeBottomTab: { ...s.activeBottomTab, [wsId]: "" },
+        terminalSplit:   { ...s.terminalSplit, [wsId]: false },
+      };
+    }
     return {
       bottomTabs:      { ...s.bottomTabs, [wsId]: next },
       activeBottomTab: { ...s.activeBottomTab, [wsId]: active },
@@ -330,10 +339,20 @@ export const useApp = create<AppState>((set, get) => ({
     const next = list.filter(t => t.id !== tabId);
     let active = s.activeTab[wsId];
     if (active === tabId) active = next[Math.max(0, idx - 1)]?.id || next[0]?.id || "";
-    return {
+    // Last tab closed → put the workspace to sleep: clear the active
+    // selection (so the dashboard takes over the main pane) and let
+    // ensureDefaultTab respawn one when the user re-enters. Every PTY
+    // for this workspace gets a kill above as the tabs are popped, so
+    // nothing stays running in the background after this.
+    const isLast = next.length === 0;
+    const update: Partial<typeof s> = {
       tabs: { ...s.tabs, [wsId]: next },
       activeTab: { ...s.activeTab, [wsId]: active },
     };
+    if (isLast && s.activeWorkspaceId === wsId) {
+      (update as any).activeWorkspaceId = null;
+    }
+    return update as any;
   }),
 
   setActiveTabId: (wsId, tabId) => set(s => ({ activeTab: { ...s.activeTab, [wsId]: tabId } })),
