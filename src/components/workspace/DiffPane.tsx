@@ -76,6 +76,25 @@ export function DiffPane({ ws, tab }: { ws: Workspace; tab: DiffTab }) {
         EditorView.theme({
           "&": { fontSize: `${editorFontSize}px` },
           ".cm-content, .cm-gutters": { fontFamily: "inherit" },
+          // CodeMirror merge's default styles draw a border + underline
+          // around every inline change — looks like every other line is
+          // boxed in green. Override to a flat background tint.
+          ".cm-changedText": {
+            background: "rgba(76,175,80,0.18)",
+            textDecoration: "none",
+            borderRadius: "2px",
+            boxShadow: "none",
+          },
+          ".cm-changedLine": {
+            backgroundColor: "rgba(76,175,80,0.06)",
+          },
+          ".cm-deletedChunk": {
+            backgroundColor: "rgba(239,83,80,0.08)",
+          },
+          ".cm-deletedText": {
+            background: "rgba(239,83,80,0.22)",
+            textDecoration: "none",
+          },
         }),
       ];
       if (lang) baseExt.push(lang as Extension);
