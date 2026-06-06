@@ -1,6 +1,6 @@
 // Mirrors the Serde structs in src-tauri/src/lib.rs. Keep in sync.
 
-export type CLI = "claude" | "codex" | "agy" | "gemini" | "grok";
+export type CLI = "claude" | "codex" | "agy" | "kimi" | "opencode" | "cursor" | "grok";
 
 export interface Project {
   id: string;
@@ -110,8 +110,8 @@ export interface Workspace {
    *  doomed resume attempt. Flipped false on a confirmed failure. */
   has_resumable_history?: boolean;
   /** Per-CLI session UUIDs we own. Lazily minted on first spawn for an
-   *  id-capable CLI (claude / gemini today). Reused on every subsequent
-   *  spawn via `resume_id_args`. Keyed by agent id ("claude", "gemini").
+   *  id-capable CLI (claude / kimi today). Reused on every subsequent
+   *  spawn via `resume_id_args`. Keyed by agent id ("claude", "kimi").
    *  Survives across termic restarts; lets us auto-resume in repo-root
    *  workspaces too without cross-pollinating with the user's external
    *  sessions in the same cwd. */
@@ -189,7 +189,7 @@ export interface Agent {
    *  invalidate existing workspaces. */
   command: string;
   args: string[];
-  /** Icon identifier. Either a brand id ("claude" / "gemini" / "codex") or
+  /** Icon identifier. Either a brand id ("claude" / "kimi" / "opencode" / "codex") or
    *  a generic key prefixed with "lucide:" (e.g. "lucide:terminal"). */
   icon_id: string;
   /** Hex color string for the icon tint. */
@@ -350,7 +350,7 @@ export interface BaseTab {
 
 export interface TerminalTab extends BaseTab {
   type: "terminal";
-  /** Agent id (claude / gemini / codex / agy) the tab runs, OR the
+  /** Agent id (claude / kimi / opencode / codex / agy / grok) the tab runs, OR the
    *  sentinel `"shell"` for a plain login-shell tab, OR `"custom"` for a
    *  workspace launched with a user-supplied command (see `command`). */
   cli: string;
@@ -375,7 +375,7 @@ export interface TerminalTab extends BaseTab {
   is_default?: boolean;
   /** iTerm2-style work-progress state. Authoritative signals: OSC 9;4
    *  (Claude progress), OSC 133;C/D (FinalTerm semantic prompts), OSC 0
-   *  title classifier (gemini/codex). `working` → spinner; `done` →
+   *  title classifier (kimi/codex). `working` → spinner; `done` →
    *  blue bullet; cleared on next user keystroke (NOT on tab view). */
   workState?: "idle" | "working" | "done";
   /** Optional 0..100 progress percentage from ConEmu OSC 9;4;1|2|4;<pct>.

@@ -4,7 +4,7 @@
 //   Project   — a git repo on disk. User adds repos by picking their root dir.
 //   Workspace — a git worktree branched from `base_branch`. Each workspace
 //               has its own folder + an embedded terminal running the chosen
-//               agent CLI (claude / gemini / codex).
+//               agent CLI (claude / kimi / opencode / codex).
 //
 // Terminal: PTYs are managed in `PtyManager`. The frontend (xterm.js) and
 // backend communicate via Tauri events:
@@ -164,7 +164,7 @@ pub struct Workspace {
     pub branch: String,      // e.g. "montreal"
     pub base_branch: String, // e.g. "master"
     pub path: String,        // worktree absolute path
-    pub cli: String,         // claude / gemini / codex
+    pub cli: String,         // claude / kimi / opencode / codex
     pub port: u16,
     pub created: String,
     pub archived: bool,
@@ -193,9 +193,9 @@ pub struct Workspace {
     #[serde(default)]
     pub has_resumable_history: bool,
     /// Per-CLI session UUIDs we own. Lazily minted on first spawn for
-    /// an id-capable CLI (claude / gemini today). Reused on every
+    /// an id-capable CLI (claude / kimi today). Reused on every
     /// subsequent spawn via the agent's `resume_id_args`. Keyed by
-    /// agent id ("claude", "gemini"). Survives termic restarts; lets
+    /// agent id ("claude", "kimi"). Survives termic restarts; lets
     /// repo-root workspaces auto-resume without cross-pollinating with
     /// the user's external sessions in the same cwd.
     #[serde(default)]
@@ -505,7 +505,7 @@ pub struct SpawnArgs {
     pub workspace_id: Option<String>,
     /// The agent ID being spawned in *this* tab. May differ from
     /// `workspace.cli` because a workspace can host multiple tabs
-    /// running different agents (e.g. a claude workspace with a gemini
+    /// running different agents (e.g. a claude workspace with a kimi
     /// tab open). Drives which agent's `sandbox_allowed_paths` +
     /// per-CLI host allowlist get baked into the freshly-provisioned
     /// SBPL profile. Falls back to `workspace.cli` when absent.
@@ -522,7 +522,27 @@ fn default_cols() -> u16 { 120 }
 /// file. It is also OUTSIDE the per-workspace sandbox, so a caged
 /// agent cannot edit the config the sandbox reads.
 fn repo_config_for(proj: &Project) -> repo_config::RepoConfig {
-    repo_config::load_or_default(Path::new(&proj.root_path))
+    let root = Path::new(&proj.root_path);
+    if let Some(cfg) = repo_config::load(root).ok().flatten() {
+        return cfg;
+    }
+    // Fallback: if .termic.yaml is absent but conductor.json exists,
+    // synthesize a RepoConfig from it so setup/run/archive scripts work.
+    let (setup, run, archive, files) = read_conductor_json(root);
+    if !setup.is_empty() || !run.is_empty() || !archive.is_empty() || !files.is_empty() {
+        return repo_config::RepoConfig {
+            version: 1,
+            scripts: repo_config::RepoScripts {
+                setup,
+                run,
+                archive,
+                files_to_copy: files,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+    }
+    repo_config::RepoConfig::default()
 }
 
 /// Compute the live sandbox allow-lists for a workspace at spawn time.
@@ -565,6 +585,65 @@ fn live_sandbox_lists(ws: &Workspace) -> (Vec<String>, Vec<String>) {
 fn dedup_strings(v: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     v.into_iter().filter(|x| seen.insert(x.clone())).collect()
+}
+
+/// Read `conductor.json` from repo root and extract setup/run/archive scripts.
+/// Returns (setup, run, archive, extra_files_to_copy).
+///
+/// Supports two shapes:
+///   1. `{"scripts": {"setup": "cmd", "server": "cmd", "archive": "cmd"}}`
+///      — values are literal script bodies (conductor.build style).
+///   2. `{"setup": "path/to.sh", "run": "path/to.sh", "archive": "path/to.sh"}`
+///      — values are relative file paths; we read the file contents.
+fn read_conductor_json(repo_root: &Path) -> (String, String, String, Vec<String>) {
+    let path = repo_root.join("conductor.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return (String::new(), String::new(), String::new(), Vec::new()),
+    };
+    let val: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), String::new(), String::new(), Vec::new()),
+    };
+
+    // Helper: resolve a script value.
+    // If the value is a string that points to an existing file, read the file.
+    // Otherwise treat the string as the literal script body.
+    let resolve = |v: &serde_json::Value| -> Option<String> {
+        let s = v.as_str()?;
+        let p = repo_root.join(s);
+        if p.is_file() {
+            fs::read_to_string(&p).ok()
+        } else {
+            Some(s.to_string())
+        }
+    };
+
+    // Try the nested `scripts` object first (conductor.build style).
+    let (setup, run, archive) = if let Some(scripts) = val.get("scripts") {
+        (
+            scripts.get("setup").and_then(resolve).unwrap_or_default(),
+            scripts.get("server").and_then(resolve).unwrap_or_default(),
+            scripts.get("archive").and_then(resolve).unwrap_or_default(),
+        )
+    } else {
+        // Fall back to root-level keys (legacy file-path style).
+        (
+            val.get("setup").and_then(resolve).unwrap_or_default(),
+            val.get("run").and_then(resolve).unwrap_or_default(),
+            val.get("archive").and_then(resolve).unwrap_or_default(),
+        )
+    };
+
+    let mut extra_files = Vec::new();
+    // Always copy conductor.json itself so the worktree can reference it.
+    extra_files.push("conductor.json".into());
+    // Copy .conductor/ directory if it exists (holds the actual scripts).
+    if repo_root.join(".conductor").is_dir() {
+        extra_files.push(".conductor".into());
+    }
+
+    (setup, run, archive, extra_files)
 }
 
 /// Effective (setup, run, archive) scripts for a single-repo project.
@@ -667,7 +746,7 @@ fn pty_spawn(
     }
     // Override the inherited PATH with the login-shell-resolved one.
     // GUI-launched .app bundles get a bare PATH from launchd; without
-    // this, `claude` / `codex` / `gemini` installed in ~/.local/bin,
+    // this, `claude` / `codex` / `kimi` / `opencode` installed in ~/.local/bin,
     // ~/.bun/bin, /opt/homebrew/bin, or under nvm aren't found. See
     // shell_env.rs.
     cmd.env("PATH", shell_env::resolved_path());
@@ -898,6 +977,16 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
     let remote = if non_git { String::new() } else { detect_default_remote(&canon) };
     let ws_path = worktrees_base().map_err(|e| e.to_string())?
         .join(&name).to_string_lossy().into_owned();
+
+    // If conductor.json exists, read setup/run/archive scripts from it
+    // and add conductor.json + .conductor/ to files_to_copy.
+    let (cond_setup, cond_run, cond_archive, conductor_files) =
+        if non_git {
+            (String::new(), String::new(), String::new(), Vec::new())
+        } else {
+            read_conductor_json(&canon)
+        };
+
     let p = Project {
         id: Uuid::new_v4().to_string(),
         name,
@@ -916,18 +1005,21 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         //                   on each new worktree. Caveat: venvs bake the
         //                   absolute path into `bin/activate`; users with
         //                   broken activate scripts can drop this.
-        //   node_modules  — npm deps. Saves multi-minute npm install. Caveat:
-        //                   can be 500MB+; users with mono-repos may want to
-        //                   strip this and run `npm ci` in the setup script.
+        // node_modules is intentionally excluded — users should run `npm ci`
+        // in the setup script (or use pnpm global store). This avoids copying
+        // 500MB+ per worktree.
+        //
+        // conductor.json — if present, Termic reads setup/run/archive scripts
+        // from it and also copies conductor.json + .conductor/ into the worktree.
         // Non-git folders copy nothing — there's no worktree to seed.
-        files_to_copy: if non_git { Vec::new() } else { vec![
-            ".env*".into(),
-            ".venv".into(),
-            "node_modules".into(),
-        ] },
-        setup_script: String::new(),
-        run_script: String::new(),
-        archive_script: String::new(),
+        files_to_copy: if non_git { Vec::new() } else {
+            let mut base = vec![".env*".into(), ".venv".into()];
+            base.extend(conductor_files.iter().cloned());
+            base
+        },
+        setup_script: cond_setup.clone(),
+        run_script: cond_run.clone(),
+        archive_script: cond_archive.clone(),
         default_cli: "claude".into(),
         created: chrono::Utc::now().to_rfc3339(),
         // Sandbox defaults: OFF for new projects. Users opt in via
@@ -946,6 +1038,20 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
+
+    // If conductor.json provided scripts, also write them to .termic.yaml
+    // so the repo itself carries the config (team-shared, committed).
+    if !non_git {
+        let mut cfg = repo_config::load_or_default(&canon);
+        cfg.scripts.setup = cond_setup;
+        cfg.scripts.run = cond_run;
+        cfg.scripts.archive = cond_archive;
+        cfg.scripts.files_to_copy = p.files_to_copy.clone();
+        if let Err(e) = repo_config::save(&canon, &cfg) {
+            eprintln!("[conductor] failed to write .termic.yaml: {e}");
+        }
+    }
+
     Ok(p)
 }
 
@@ -1860,7 +1966,7 @@ fn workspace_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<
         // from a git host worktree. Members get worktree'd / symlinked
         // into the wrapper below, same as the git path.
         fs::create_dir_all(&wrapper).map_err(|e| format!("create wrapper dir failed: {e}"))?;
-        for shared in &["CLAUDE.md", "AGENTS.md", "GEMINI.md", ".claude", ".gemini", ".codex"] {
+        for shared in &["CLAUDE.md", "AGENTS.md", ".claude", ".gemini", ".codex"] {
             let src = host_repo.join(shared);
             if src.exists() {
                 let dst = wrapper.join(shared);
@@ -2248,7 +2354,7 @@ fn project_rename(id: String, name: String) -> Result<Project, String> {
 
 #[tauri::command]
 fn workspace_set_cli(id: String, cli: String) -> Result<Workspace, String> {
-    if !["claude", "codex", "agy", "gemini", "grok"].contains(&cli.as_str()) {
+    if !["claude", "codex", "agy", "kimi", "opencode", "cursor", "grok"].contains(&cli.as_str()) {
         return Err(format!("unknown cli: {cli}"));
     }
     let mut list = load_workspaces();
@@ -2707,7 +2813,7 @@ fn workspace_set_has_history(id: String, value: bool) -> Result<(), String> {
 
 /// Pin a termic-owned session UUID for a (workspace, agent CLI) pair.
 /// Called by the frontend after the first spawn for an id-capable CLI
-/// (claude, gemini) has survived past the rapid-failure window — at
+/// (claude, kimi) has survived past the rapid-failure window — at
 /// that point the agent has materialized a session file for that uuid,
 /// so every subsequent spawn can resume it. Idempotent: re-setting the
 /// same uuid is a cheap no-op (no disk write).
@@ -4560,7 +4666,7 @@ pub struct Settings {
     pub repos_dir: String,
     /// True once the user has finished the welcome wizard.
     pub welcomed: bool,
-    /// Registered agent CLIs (claude/gemini/codex defaults + user customs).
+    /// Registered agent CLIs (claude/kimi/opencode/codex defaults + user customs).
     /// Workspaces reference these by `id`. Always seeded with the built-ins on
     /// first load so the app is usable out of the box.
     pub agents: Vec<Agent>,
@@ -4647,7 +4753,7 @@ pub struct AgentCapabilities {
     /// per-directory history file. Empty → no auto-resume for this agent.
     #[serde(default)]
     pub resume_args: Vec<String>,
-    /// FIRST-spawn args for an id-capable CLI (claude, gemini). Must
+    /// FIRST-spawn args for an id-capable CLI (claude, kimi). Must
     /// contain `{UUID}` which expands to a freshly-minted uuid that the
     /// frontend then persists on the workspace. Subsequent spawns use
     /// `resume_id_args` with the same uuid. Empty → CLI doesn't support
@@ -4804,35 +4910,61 @@ fn default_agents() -> Vec<Agent> {
             work_done: true,
         },
         Agent {
-            id: "gemini".into(),
-            display_name: "gemini".into(),
-            command: "gemini".into(),
+            // Moonshot AI Kimi CLI (kimi-code).
+            id: "kimi".into(),
+            display_name: "Kimi".into(),
+            command: "kimi".into(),
             args: vec![],
-            icon_id: "gemini".into(),
-            color: "#4c8bf5".into(),
+            icon_id: "kimi".into(),
+            color: "#00b4ff".into(),
             builtin: true,
             disabled: false,
             capabilities: AgentCapabilities {
-                yolo_args: vec!["--yolo".into()],
-                // gemini's live approval-mode switch — one command per
-                // direction (the form exposes both as separate fields).
-                runtime_yolo_command: "/approval-mode yolo".into(),
-                runtime_default_command: "/approval-mode default".into(),
-                // Legacy fallback for workspaces with no stored uuid.
-                resume_args: vec!["--resume".into(), "latest".into()],
-                // Gemini matches claude here — `--session-id <uuid>` to
-                // mint, `--resume <uuid>` to pick it up later.
-                session_id_args: vec!["--session-id".into(), "{UUID}".into()],
-                resume_id_args:  vec!["--resume".into(),     "{UUID}".into()],
+                yolo_args: vec!["-y".into()],
+                runtime_yolo_command: String::new(),
+                runtime_default_command: String::new(),
+                resume_args: vec![],
+                session_id_args: vec![],
+                resume_id_args: vec![],
                 name_args: vec![],
             },
             env: std::collections::HashMap::new(),
             sandbox_allowed_paths: vec![
-                "$HOME/.gemini".into(),
-                "$HOME/.config/gemini".into(),
-                "$HOME/.local/share/gemini".into(),
-                "$HOME/.local/state/gemini".into(),
-                "$HOME/Library/Application Support/Gemini".into(),
+                "$HOME/.kimi".into(),
+                "$HOME/.kimi-code".into(),
+                "$HOME/.config/kimi".into(),
+                "$HOME/.local/share/kimi".into(),
+                "$HOME/.local/state/kimi".into(),
+                "$HOME/Library/Application Support/Kimi".into(),
+            ],
+            work_done: true,
+        },
+        Agent {
+            // Opencode CLI.
+            id: "opencode".into(),
+            display_name: "Opencode".into(),
+            command: "opencode".into(),
+            args: vec![],
+            icon_id: "opencode".into(),
+            color: "#f97316".into(),
+            builtin: true,
+            disabled: false,
+            capabilities: AgentCapabilities {
+                yolo_args: vec![],
+                runtime_yolo_command: String::new(),
+                runtime_default_command: String::new(),
+                resume_args: vec!["-c".into()],
+                session_id_args: vec![],
+                resume_id_args:  vec!["-s".into(), "{UUID}".into()],
+                name_args: vec![],
+            },
+            env: std::collections::HashMap::new(),
+            sandbox_allowed_paths: vec![
+                "$HOME/.opencode".into(),
+                "$HOME/.config/opencode".into(),
+                "$HOME/.local/share/opencode".into(),
+                "$HOME/.local/state/opencode".into(),
+                "$HOME/Library/Application Support/Opencode".into(),
             ],
             work_done: true,
         },
@@ -4866,6 +4998,35 @@ fn default_agents() -> Vec<Agent> {
                 "$HOME/.local/share/grok".into(),
                 "$HOME/.local/state/grok".into(),
                 "$HOME/Library/Application Support/Grok".into(),
+            ],
+            work_done: true,
+        },
+        Agent {
+            // Cursor Agent CLI (binary name: `agent`).
+            id: "cursor".into(),
+            display_name: "Cursor".into(),
+            command: "agent".into(),
+            args: vec![],
+            icon_id: "cursor".into(),
+            color: "#a0a0a0".into(),
+            builtin: true,
+            disabled: false,
+            capabilities: AgentCapabilities {
+                yolo_args: vec!["--yolo".into()],
+                runtime_yolo_command: String::new(),
+                runtime_default_command: String::new(),
+                resume_args: vec!["--continue".into()],
+                session_id_args: vec!["--resume".into(), "{UUID}".into()],
+                resume_id_args:  vec!["--resume".into(), "{UUID}".into()],
+                name_args: vec![],
+            },
+            env: std::collections::HashMap::new(),
+            sandbox_allowed_paths: vec![
+                "$HOME/.cursor".into(),
+                "$HOME/.config/cursor".into(),
+                "$HOME/.local/share/cursor".into(),
+                "$HOME/.local/state/cursor".into(),
+                "$HOME/Library/Application Support/Cursor".into(),
             ],
             work_done: true,
         },
@@ -5191,6 +5352,8 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
                         format!("/usr/local/bin/{bin}"),
                         format!("{home}/.bun/bin/{bin}"),
                         format!("{home}/.cargo/bin/{bin}"),
+                        format!("{home}/.kimi-code/bin/{bin}"),
+                        format!("{home}/.opencode/bin/{bin}"),
                     ] {
                         if Path::new(&c).exists() {
                             found = true;

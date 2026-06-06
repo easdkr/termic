@@ -90,7 +90,7 @@ fn probe_login_shell() -> Option<String> {
 /// Shell probe failed or timed out. Union the bare PATH with the
 /// well-known dev-tool locations. Misses dynamic shims (nvm picks
 /// a node version per shell), but covers the common static
-/// installers so at least `claude`, `codex`, `gemini` resolve.
+/// installers so at least `claude`, `codex`, `kimi`, `opencode` resolve.
 pub(crate) fn fallback_path(current: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let extras: Vec<String> = vec![
@@ -105,6 +105,8 @@ pub(crate) fn fallback_path(current: &str) -> String {
         format!("{home}/.volta/bin"),
         format!("{home}/.npm-global/bin"),
         format!("{home}/n/bin"),
+        format!("{home}/.kimi-code/bin"),
+        format!("{home}/.opencode/bin"),
     ];
 
     let mut seen: std::collections::HashSet<String> =

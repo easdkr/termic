@@ -50,14 +50,16 @@ function workspaceVars(ws: Workspace | undefined, sessionUuid?: string): Record<
 }
 
 /** True iff the agent supports termic-owned deterministic sessions
- *  (both session_id_args + resume_id_args configured). */
+ *  (resume_id_args configured). session_id_args is optional — some
+ *  CLIs (opencode) can only resume by id, not mint a new session with
+ *  one, so we skip the mint flag on first spawn and rely on the CLI's
+ *  own session creation, then resume via resume_id_args later. */
 export function cliSupportsIdSession(cli: string): boolean {
   const { caps } = findAgent(cli);
-  return (caps.session_id_args?.length ?? 0) > 0
-      && (caps.resume_id_args?.length ?? 0) > 0;
+  return (caps.resume_id_args?.length ?? 0) > 0;
 }
 
-/** Hard-coded fallback for the four built-ins. Used only when the
+/** Hard-coded fallback for the built-ins. Used only when the
  *  registry doesn't have an entry for `cli` yet (pre-load) or when the
  *  registry is empty. The registry is the source of truth in steady state. */
 const BUILTIN_FALLBACK: Record<string, Pick<Agent, "command" | "args"> & {
@@ -86,16 +88,37 @@ const BUILTIN_FALLBACK: Record<string, Pick<Agent, "command" | "args"> & {
       name_args: ["--name", "{WORKSPACE_SLUG}"],
     },
   },
-  gemini: {
-    command: "gemini", args: [],
+  kimi: {
+    command: "kimi", args: [],
+    capabilities: {
+      yolo_args: ["-y"],
+      runtime_yolo_command: "",
+      resume_args: [],
+      session_id_args: [],
+      resume_id_args: [],
+      name_args: [],
+    },
+  },
+  opencode: {
+    command: "opencode", args: [],
+    capabilities: {
+      yolo_args: [],
+      runtime_yolo_command: "",
+      resume_args: ["-c"],
+      session_id_args: [],
+      resume_id_args:  ["-s", "{UUID}"],
+      name_args: [],
+    },
+  },
+  cursor: {
+    command: "agent", args: [],
     capabilities: {
       yolo_args: ["--yolo"],
-      runtime_yolo_command: "/approval-mode yolo",
-      runtime_default_command: "/approval-mode default",
-      // Legacy fallback for workspaces without a stored uuid yet.
-      resume_args: ["--resume", "latest"],
-      session_id_args: ["--session-id", "{UUID}"],
-      resume_id_args:  ["--resume",     "{UUID}"],
+      runtime_yolo_command: "",
+      resume_args: ["--continue"],
+      session_id_args: ["--resume", "{UUID}"],
+      resume_id_args:  ["--resume", "{UUID}"],
+      name_args: [],
     },
   },
   codex: {
@@ -126,13 +149,15 @@ export function agentDisplayName(cli: string, agents: Agent[] = useApp.getState(
   if (a) return a.display_name;
   // Fallback for built-ins if the registry is not yet loaded or empty
   switch (cli) {
-    case "claude": return "Claude";
-    case "gemini": return "Gemini";
-    case "codex":  return "Codex";
-    case "agy":    return "Antigravity";
-    case "shell":  return "Terminal";
-    case "custom": return "Command";
-    default:       return cli;
+    case "claude":   return "Claude";
+    case "kimi":     return "Kimi";
+    case "opencode": return "Opencode";
+    case "cursor":   return "Cursor";
+    case "codex":    return "Codex";
+    case "agy":      return "Antigravity";
+    case "shell":    return "Terminal";
+    case "custom":   return "Command";
+    default:         return cli;
   }
 }
 
@@ -233,12 +258,13 @@ export function spawnArgsForCli(
   const { args, caps } = findAgent(cli);
   const vars = workspaceVars(opts.ws, opts.sessionUuid);
 
-  const hasIdResume = (caps.session_id_args?.length ?? 0) > 0
-                   && (caps.resume_id_args?.length ?? 0) > 0;
+  // id-based resume: resume_id_args is required; session_id_args is
+  // optional (opencode can resume by id but can't mint with one).
+  const hasIdResume = (caps.resume_id_args?.length ?? 0) > 0;
   let resumeBlock: string[] = [];
-  // True ONLY on the spawn that mints the session (session_id_args:
-  // sessionUuid present and not yet known to the agent). This is the
-  // single spawn that carries name_args.
+  // True ONLY on the spawn that mints the session (session_id_args
+  // present and the uuid hasn't been used before). This is the single
+  // spawn that carries name_args.
   let isFirstIdSpawn = false;
   if (hasIdResume && opts.sessionUuid) {
     if (opts.resumeKnown) {
@@ -251,6 +277,10 @@ export function spawnArgsForCli(
     resumeBlock = caps.resume_args ?? [];
   }
 
+  // kimi rejects --yolo combined with --continue / --session.
+  // When both are requested, prefer resume (existing workspace) and
+  // drop yolo for this spawn.
+  const skipYolo = cli === "kimi" && resumeBlock.length > 0;
   const composed = [
     ...args,
     ...resumeBlock,
@@ -258,7 +288,7 @@ export function spawnArgsForCli(
     // resume) so claude always shows the workspace name. Skipped for
     // secondary "+" tabs (isPrimary=false) and no-workspace spawns.
     ...(opts.isPrimary && opts.ws ? (caps.name_args ?? []) : []),
-    ...(opts.yolo ? (caps.yolo_args ?? []) : []),
+    ...(opts.yolo && !skipYolo ? (caps.yolo_args ?? []) : []),
   ];
   return composed.map(a => expandArg(a, vars));
 }

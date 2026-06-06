@@ -148,41 +148,41 @@ describe("visibleCliIds", () => {
     ({ id, disabled, command: id, display_name: id, args: [] }) as unknown as Agent;
 
   it("returns all candidates when detected map is empty (pre-detection)", () => {
-    const agents = [makeAgent("claude"), makeAgent("gemini")];
-    const result = visibleCliIds(["claude", "gemini"], agents, {});
-    expect(result).toEqual(new Set(["claude", "gemini"]));
+    const agents = [makeAgent("claude"), makeAgent("kimi")];
+    const result = visibleCliIds(["claude", "kimi"], agents, {});
+    expect(result).toEqual(new Set(["claude", "kimi"]));
   });
 
   it("hides disabled agents regardless of detection", () => {
-    const agents = [makeAgent("claude", true), makeAgent("gemini")];
+    const agents = [makeAgent("claude", true), makeAgent("kimi")];
     const detected: Record<string, CliInfo> = {
       claude: { name: "claude", found: true, path: "/usr/local/bin/claude", version: "1.0" },
-      gemini: { name: "gemini", found: true, path: "/usr/local/bin/gemini", version: "1.0" },
+      kimi:   { name: "kimi",   found: true, path: "/usr/local/bin/kimi",   version: "1.0" },
     };
-    const result = visibleCliIds(["claude", "gemini"], agents, detected);
+    const result = visibleCliIds(["claude", "kimi"], agents, detected);
     expect(result.has("claude")).toBe(false);
-    expect(result.has("gemini")).toBe(true);
+    expect(result.has("kimi")).toBe(true);
   });
 
   it("hides uninstalled agents when detection resolves", () => {
-    const agents = [makeAgent("claude"), makeAgent("gemini")];
+    const agents = [makeAgent("claude"), makeAgent("kimi")];
     const detected: Record<string, CliInfo> = {
       claude: { name: "claude", found: true, path: "/usr/local/bin/claude", version: "1.0" },
-      gemini: { name: "gemini", found: false, path: "", version: "" },
+      kimi:   { name: "kimi",   found: false, path: "", version: "" },
     };
-    const result = visibleCliIds(["claude", "gemini"], agents, detected);
-    expect(result.has("gemini")).toBe(false);
+    const result = visibleCliIds(["claude", "kimi"], agents, detected);
+    expect(result.has("kimi")).toBe(false);
     expect(result.has("claude")).toBe(true);
   });
 
   it("falls back to full enabled set if filtering would empty the picker", () => {
     // All agents not-found: rather than empty picker, show all enabled ones.
-    const agents = [makeAgent("claude"), makeAgent("gemini")];
+    const agents = [makeAgent("claude"), makeAgent("kimi")];
     const detected: Record<string, CliInfo> = {
       claude: { name: "claude", found: false, path: "", version: "" },
-      gemini: { name: "gemini", found: false, path: "", version: "" },
+      kimi:   { name: "kimi",   found: false, path: "", version: "" },
     };
-    const result = visibleCliIds(["claude", "gemini"], agents, detected);
+    const result = visibleCliIds(["claude", "kimi"], agents, detected);
     expect(result.size).toBeGreaterThan(0);
   });
 
@@ -206,8 +206,12 @@ describe("cliSupportsIdSession", () => {
     expect(cliSupportsIdSession("claude")).toBe(true);
   });
 
-  it("gemini supports id sessions (built-in fallback)", () => {
-    expect(cliSupportsIdSession("gemini")).toBe(true);
+  it("kimi does NOT support id sessions (no resume_id_args in fallback)", () => {
+    expect(cliSupportsIdSession("kimi")).toBe(false);
+  });
+
+  it("opencode supports id sessions (resume_id_args only)", () => {
+    expect(cliSupportsIdSession("opencode")).toBe(true);
   });
 
   it("codex does NOT support id sessions (no session_id_args in fallback)", () => {
@@ -234,8 +238,9 @@ describe("agentDisplayName", () => {
 
   it("returns built-in name for known CLIs when registry is empty", () => {
     const cases: [string, string][] = [
-      ["claude", "Claude"], ["gemini", "Gemini"], ["codex", "Codex"],
-      ["agy", "Antigravity"], ["shell", "Terminal"], ["custom", "Command"],
+      ["claude", "Claude"], ["kimi", "Kimi"], ["opencode", "Opencode"],
+      ["cursor", "Cursor"], ["codex", "Codex"], ["agy", "Antigravity"],
+      ["shell", "Terminal"], ["custom", "Command"],
     ];
     for (const [cli, name] of cases) {
       expect(agentDisplayName(cli, [])).toBe(name);

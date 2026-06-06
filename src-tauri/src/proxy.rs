@@ -293,7 +293,7 @@ fn handle_connect(mut client: TcpStream, target: &str, regexes: &[Regex], ws_id:
         // reason phrase is what curl/most clients echo on errors;
         // the body + X-Termic-Sandbox header are for fetch()-style
         // clients that parse the response. The whole stanza is the
-        // "hint" — a sandboxed claude/codex/gemini can pattern-match
+        // "hint" — a sandboxed claude/codex/kimi can pattern-match
         // "Blocked by Termic sandbox" and tell the user what to do.
         let body = format!(
             "Blocked by Termic sandbox.\n\n\

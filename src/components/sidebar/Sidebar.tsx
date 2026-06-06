@@ -98,7 +98,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
       t.type === "terminal" && t.workState === "done",
     );
   // Distinct from work-done: the agent is explicitly blocked on the
-  // user (Gemini ✋ Action Required, Codex Waiting, OSC 1337
+  // user (Codex Waiting, OSC 1337
   // RequestAttention). Different sidebar icon (bell vs check).
   const needsAttention = (wsId: string) =>
     settledHighlight &&

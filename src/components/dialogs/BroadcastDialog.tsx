@@ -78,7 +78,7 @@ export function BroadcastDialog() {
     // Stamp lastInputAt so TerminalPane's submittedSinceSpawn ref is armed.
     // Broadcast bypasses term.onData (it writes directly to the PTY), so
     // without this the title-based working detector stays suppressed and
-    // agents like Gemini never get a working→done transition for broadcast work.
+    // agents never get a working→done transition for broadcast work.
     if (wsId) for (const t of picked) patchTab(wsId, t.id, { lastInputAt: now });
     close();
     pushToast(`Broadcast to ${picked.length} agent${picked.length === 1 ? "" : "s"}`);

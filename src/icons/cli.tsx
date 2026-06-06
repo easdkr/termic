@@ -13,10 +13,32 @@ export function ClaudeIcon({ className }: Props) {
   );
 }
 
-export function GeminiIcon({ className }: Props) {
+export function KimiIcon({ className }: Props) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className={cn("inline-block", className)} aria-hidden>
-      <path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/>
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h-2v-2h2v2zm0-4h-2V7h2v6zm4 4h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+    </svg>
+  );
+}
+
+export function OpencodeIcon({ className }: Props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      strokeLinecap="round" strokeLinejoin="round" className={cn("inline-block", className)} aria-hidden>
+      <path d="M12 2a10 10 0 0 1 10 10 10 10 0 0 1-10 10A10 10 0 0 1 2 12 10 10 0 0 1 12 2z"/>
+      <path d="M8 12h8"/>
+      <path d="M12 8v8"/>
+    </svg>
+  );
+}
+
+// Cursor IDE icon — a stylized "C" bracket shape, stroke style.
+export function CursorIcon({ className }: Props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      strokeLinecap="round" strokeLinejoin="round" className={cn("inline-block", className)} aria-hidden>
+      <path d="M6 4h4a6 6 0 0 1 6 6v0a6 6 0 0 1-6 6H6"/>
+      <line x1="6" y1="12" x2="14" y2="12" />
     </svg>
   );
 }
@@ -85,13 +107,15 @@ export function CustomCommandIcon({ className }: Props) {
 /** Pick the right icon for a CLI name; falls back to a generic terminal glyph. */
 export function CliIcon({ cli, className }: { cli: string; className?: string }) {
   switch (cli) {
-    case "claude": return <ClaudeIcon className={className} />;
-    case "gemini": return <GeminiIcon className={className} />;
-    case "codex":  return <CodexIcon  className={className} />;
-    case "agy":    return <AntigravityIcon className={className} />;
-    case "grok":   return <GrokIcon className={className} />;
-    case "shell":  return <ShellIcon className={className} />;
-    case "custom": return <CustomCommandIcon className={className} />;
+    case "claude":   return <ClaudeIcon className={className} />;
+    case "kimi":     return <KimiIcon className={className} />;
+    case "opencode": return <OpencodeIcon className={className} />;
+    case "cursor":   return <CursorIcon className={className} />;
+    case "codex":    return <CodexIcon  className={className} />;
+    case "agy":      return <AntigravityIcon className={className} />;
+    case "grok":     return <GrokIcon className={className} />;
+    case "shell":    return <ShellIcon className={className} />;
+    case "custom":   return <CustomCommandIcon className={className} />;
     default: return (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
         strokeLinecap="round" strokeLinejoin="round" className={cn("inline-block", className)} aria-hidden>
@@ -102,11 +126,13 @@ export function CliIcon({ cli, className }: { cli: string; className?: string })
 }
 
 export const CLI_BRAND_COLOR: Record<string, string> = {
-  claude: "text-[var(--color-cli-claude)]",
-  gemini: "text-[var(--color-cli-gemini)]",
-  codex:  "text-[var(--color-cli-codex)]",
-  agy:    "text-[var(--color-cli-agy)]",
-  grok:   "text-[var(--color-cli-grok)]",
+  claude:   "text-[var(--color-cli-claude)]",
+  kimi:     "text-[var(--color-cli-kimi)]",
+  opencode: "text-[var(--color-cli-opencode)]",
+  cursor:   "text-[var(--color-cli-cursor)]",
+  codex:    "text-[var(--color-cli-codex)]",
+  agy:      "text-[var(--color-cli-agy)]",
+  grok:     "text-[var(--color-cli-grok)]",
 };
 
 /** Display label for a cli id in the pickers. The id stays terse

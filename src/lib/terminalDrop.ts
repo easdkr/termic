@@ -14,7 +14,7 @@
 // terminal's PTY through the exact same byte channel as a keystroke
 // (ipc.ptyWrite). To the agent CLI it's indistinguishable from the user
 // typing the path — which is precisely what dragging a screenshot into iTerm
-// does today, so paths land in a shape claude/gemini/codex already parse.
+// does today, so paths land in a shape claude/kimi/opencode/codex already parse.
 
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";

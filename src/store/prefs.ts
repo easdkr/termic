@@ -134,8 +134,8 @@ export function currentTerminalTheme(): Record<string, string> {
   return TERMINAL_THEMES[resolved];
 }
 
-/** COLORFGBG is the long-standing convention agents (claude / gemini /
- *  codex) use to pick their TUI theme without a manual flag. Format is
+/** COLORFGBG is the long-standing convention agents (claude / kimi /
+ *  opencode / codex) use to pick their TUI theme without a manual flag. Format is
  *  `fg;bg` where each is an ANSI color number; tools just check whether
  *  the bg value is "light" (1-6, 7, 15) or "dark" (0, 8, 16+). We emit
  *  conservative values - `0;15` (black on white) for light, `15;0`
@@ -260,7 +260,7 @@ function stackFor(id: string) {
 interface PrefsState {
   /** YOLO mode — appends each agent's "auto-approve everything" flag to its
    *  spawn args. Toggleable from the unified bar. For agents that support
-   *  runtime mode-switching (gemini), live PTYs receive a slash command on
+   *  runtime mode-switching, live PTYs receive a slash command on
    *  toggle; for the rest (claude/codex), new tabs pick it up but existing
    *  PTYs need a respawn. */
   yoloMode: boolean;
@@ -417,7 +417,7 @@ const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
 // Default ON. Claude Code's title classifier (Braille spinner glyph
 // while working, "✳" brand prefix when idle — see TerminalPane.tsx
 // classifyTitle) gives us a reliable busy→idle edge for Claude;
-// Codex/Gemini have explicit "Ready"/"Working" title states. Existing
+// Codex have explicit "Ready"/"Working" title states. Existing
 // users who toggled it OFF keep their setting (lsGetBool returns the
 // stored value when present).
 const initialSettledHighlight = lsGetBool(LS_SETTLED_HIGHLIGHT, true);

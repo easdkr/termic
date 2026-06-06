@@ -298,7 +298,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
       fontWeight: 400,
       fontWeightBold: 700,
       letterSpacing: usePrefs.getState().terminalLetterSpacing,
-      // 1.0 is xterm's default and what TUIs (gemini, claude, etc.) assume.
+      // 1.0 is xterm's default and what TUIs (kimi, claude, etc.) assume.
       // A larger lineHeight inflates every cell vertically, so any row the TUI
       // paints with a bg color reads as a visible "ribbon" instead of a tight
       // band against neighbouring rows.
@@ -375,7 +375,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     // sequence `/terminal-setup` writes into iTerm2 for Claude Code.
     // Claude's input parser reads the trailing backslash as a
     // continuation marker and inserts a soft newline instead of
-    // submitting. Gemini + codex also accept this convention.
+    // submitting. Kimi + codex also accept this convention.
     //
     // ESC+CR (`\x1b\r`, the old Option+Enter convention) was tried
     // first but recent claude builds no longer recognize it — they
@@ -398,7 +398,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
         const pid = ptyRef.current;
         if (pid) {
           // `\` + `\r` (0x5c 0x0d) — claude's `hasUsedBackslashReturn`
-          // path. Gemini + codex accept it too.
+          // path. Kimi + codex accept it too.
           ipc.ptyWrite(pid, [0x5c, 0x0d]).catch(() => {});
         }
         // BOTH stops are required:
@@ -441,7 +441,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     //                        shell-integration-aware tool.
     //   5. OSC 1337        — iTerm proprietary. RequestAttention → fire
     //                        attention.
-    //   6. OSC 0/2 title   — Gemini/Codex per-state strings (fallback
+    //   6. OSC 0/2 title   — Kimi/Codex per-state strings (fallback
     //                        for CLIs that don't emit 9 or 133).
     //   7. Settled-hash    — interval-based viewport stillness, only
     //                        fires "done" if no higher-priority signal
@@ -656,10 +656,10 @@ export function TerminalPane({ ws, tab, active }: Props) {
         if (/^\s*\S/.test(t) && !/^\s*[A-Za-z0-9]/.test(t)) return "busy";
         return null;
       }
-      if (cli === "gemini") {
-        if (t.startsWith("✋") || /Action Required/i.test(t)) return "attention";
-        if (t.startsWith("◇") || /^\s*Ready\b/.test(t)) return "idle";
-        if (t.startsWith("✦") || t.startsWith("⏲") || /Working/i.test(t)) return "busy";
+      if (cli === "kimi") {
+        if (/Action Required/i.test(t)) return "attention";
+        if (/^\s*Ready\b/.test(t)) return "idle";
+        if (/Working/i.test(t)) return "busy";
         return null;
       }
       if (cli === "codex") {
@@ -675,7 +675,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     };
 
     // OSC 0/2 — title change. Always surface as the live tab label.
-    // Only used as a busy/idle source for CLIs without OSC 9;4 (gemini,
+    // Only used as a busy/idle source for CLIs without OSC 9;4 (kimi,
     // codex). For claude (OSC 9;4 source) the title is a label only.
     let lastTitleState: "busy" | "idle" | "attention" | null = null;
     term.onTitleChange(t => {
@@ -700,7 +700,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
       dbg("title", `classifier=${state ?? "??"} title=${t}`);
       // Record the sender-classified state so the interval-based
       // demoters below (byte-quiet, settled-hash, scrollback) can
-      // skip when the title actively says "busy" — Gemini's "✦ Working"
+      // skip when the title actively says "busy" — Kimi's "Working"
       // title can sit unchanged for 30+ s while the agent thinks,
       // beating our 4 s/6 s heuristic thresholds.
       if (state) senderStateRef.current = state;
@@ -834,7 +834,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     });
 
     // WebGL renderer tiles cell backgrounds pixel-perfectly — fixes the
-    // "ribbon" artifacts in TUIs (gemini, claude) where adjacent bg-colored
+    // "ribbon" artifacts in TUIs (kimi, claude) where adjacent bg-colored
     // rows show 1px gaps with the default DOM renderer. Load AFTER term.open
     // so the GL context can attach to an already-laid-out canvas. Graceful
     // fallback: ignore failures, the DOM renderer keeps working.
@@ -968,7 +968,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
           // ws.sandbox_enabled (harmless no-op when sandbox is off).
           workspace_id: tab.sandboxed === false ? undefined : ws.id,
           // The tab's CLI may differ from the workspace's primary CLI
-          // (claude workspace with a gemini tab open, etc.). Send the
+          // (claude workspace with a kimi tab open, etc.). Send the
           // tab's agent id so the rendered SBPL profile uses THIS
           // agent's allowed paths + host allowlist, not the workspace
           // default. A shell tab has no agent id → Rust falls back to
@@ -1082,7 +1082,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
             }
             // Submit-anchored "working" promotion. Only fires for agents
             // that have emitted NO title/OSC signals (senderStateRef null)
-            // — i.e. fully silent CLIs like agy. Claude/Gemini/Codex all
+            // — i.e. fully silent CLIs like agy. Claude/Kimi/Codex all
             // set senderStateRef on their first title change and get
             // reliable working detection from there; using the submit-
             // window for them causes false positives because Claude's TUI
@@ -1347,7 +1347,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
   }, [themeMode]);
 
   // YOLO live toggle — for agents that support runtime mode switching (only
-  // gemini today), send the appropriate slash command. For claude/codex this
+  // kimi today), send the appropriate slash command. For claude/codex this
   // is a no-op; the next spawn picks up the new flag.
   const yoloMode = usePrefs(s => s.yoloMode);
   const firstYoloRun = useRef(true);
@@ -1381,8 +1381,8 @@ export function TerminalPane({ ws, tab, active }: Props) {
       if (!t || !ptyRef.current) return;
       const cur = (useApp.getState().tabs[ws.id] || []).find(x => x.id === tab.id);
       // Sender-signal gate: if the most recent title classification
-      // says "busy", trust it over every heuristic. Gemini's title
-      // ("✦ Working") can sit unchanged through a 30 s think while
+      // says "busy", trust it over every heuristic. Kimi's title
+      // ("Working") can sit unchanged through a 30 s think while
       // the agent emits nothing — without this gate, byte-quiet
       // would falsely demote to `done`.
       const senderBusy = senderStateRef.current === "busy";

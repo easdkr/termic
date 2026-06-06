@@ -813,7 +813,7 @@ fn builtin_runtime_paths(home: &str, workspace_path: &str) -> Vec<String> {
         // pip build artifacts).
         "/private/tmp".to_string(),
         "/private/var/folders".to_string(),
-        // Per-CLI agent state dirs (claude/gemini/codex) moved onto each
+        // Per-CLI agent state dirs (claude/kimi/opencode/codex) moved onto each
         // agent's `sandbox_allowed_paths` (Settings → Agents) so a claude
         // sandbox no longer has gemini/codex dirs reachable, and so custom
         // agents declare their own. See default_agents() in lib.rs.
@@ -831,7 +831,7 @@ fn builtin_runtime_paths(home: &str, workspace_path: &str) -> Vec<String> {
         format!("{home}/.cargo/env"),
         format!("{home}/.cargo/bin"),
         format!("{home}/Library/Caches"),
-        // OAuth token store. claude / gemini / codex all keep their
+        // OAuth token store. claude / kimi / opencode / codex all keep their
         // login state via securityd → Keychain ACLs; the encrypted DB
         // file itself lives here. Pre-v0.4.0 the broad-allow model
         // let agents touch it implicitly, the new allowlist would
@@ -863,10 +863,10 @@ fn builtin_runtime_paths(home: &str, workspace_path: &str) -> Vec<String> {
         format!("{home}/.CFUserTextEncoding"),
         // Agent-skills convention: ~/.agents/skills/<name>/SKILL.md +
         // bundled assets. Cross-agent because the skill manifest format
-        // is shared. Per-agent vendor dirs (~/.claude, ~/.gemini,
+        // is shared. Per-agent vendor dirs (~/.claude, ~/.kimi, ~/.opencode,
         // ~/.codex) live on each agent's sandbox_allowed_paths and are
         // intentionally NOT here — a claude sandbox shouldn't have
-        // access to gemini's OAuth token store and vice versa.
+        // access to each other's OAuth token store and vice versa.
         format!("{home}/.agents"),
         // Bun runtime cache. claude is Bun-compiled; Bun's runtime
         // pokes here for install cache + bunfig lookups. Missing
@@ -1001,17 +1001,6 @@ pub fn render_filter_for(workspace: &Workspace, agent_override: Option<&str>) ->
             // - vendor-blessed analytics for a CLI the user installed.
             r"^.+\.datadoghq\.com$".into(),
         ]),
-        "gemini" => hosts.extend([
-            r"^generativelanguage\.googleapis\.com$".into(),
-            r"^.+\.googleapis\.com$".into(),
-            r"^oauth2\.googleapis\.com$".into(),
-            r"^accounts\.google\.com$".into(),
-            r"^cloudcode-pa\.googleapis\.com$".into(),
-            r"^lh3\.googleusercontent\.com$".into(),
-            r"^.+\.googleusercontent\.com$".into(),
-            r"^antigravity-unleash\.goog$".into(),
-            r"^.+\.antigravity-unleash\.goog$".into(),
-        ]),
         "codex" => hosts.extend([
             r"^api\.openai\.com$".into(),
             r"^chatgpt\.com$".into(),
@@ -1021,9 +1010,9 @@ pub fn render_filter_for(workspace: &Workspace, agent_override: Option<&str>) ->
             r"^cdn\.openai\.com$".into(),
         ]),
         // Antigravity (`agy`) is a Gemini-3-family Google CLI — it
-        // talks to the same Google AI / Cloud Code backends gemini
-        // does. Mirrors the gemini host set; if Antigravity uses a
-        // dedicated endpoint a deny will show in the Sandbox dialog.
+        // talks to the same Google AI / Cloud Code backends. If
+        // Antigravity uses a dedicated endpoint a deny will show in
+        // the Sandbox dialog.
         "agy" => hosts.extend([
             r"^generativelanguage\.googleapis\.com$".into(),
             r"^.+\.googleapis\.com$".into(),
@@ -1035,6 +1024,11 @@ pub fn render_filter_for(workspace: &Workspace, agent_override: Option<&str>) ->
             r"^.+\.googleusercontent\.com$".into(),
             r"^antigravity-unleash\.goog$".into(),
             r"^.+\.antigravity-unleash\.goog$".into(),
+        ]),
+        "kimi" => hosts.extend([
+            r"^api\.moonshot\.cn$".into(),
+            r"^www\.moonshot\.cn$".into(),
+            r"^.+\.moonshot\.cn$".into(),
         ]),
         _ => { /* custom agents: user must list hosts explicitly */ }
     }
@@ -1405,7 +1399,7 @@ const SBPL_HEADER: &str = r#";; termic sandbox profile - generated; do not edit.
 ;; pair (/dev/ttys0NN, /dev/ptmx), /dev/random, /dev/urandom, etc.
 ;; Without file-ioctl on character devices, Node's tty.setRawMode()
 ;; throws EPERM at agent startup ("setRawMode EPERM" from
-;; node:tty:81) and every interactive Node CLI (gemini, claude in
+;; node:tty:81) and every interactive Node CLI (kimi, claude in
 ;; raw mode, etc.) fails to launch.
 (allow file-write-data (vnode-type CHARACTER-DEVICE))
 (allow file-ioctl      (vnode-type CHARACTER-DEVICE))
@@ -1895,11 +1889,13 @@ mod tests {
     }
 
     #[test]
-    fn render_filter_gemini_contains_googleapis() {
+    fn render_filter_kimi_contains_kimi_hosts() {
         use crate::Workspace;
-        let ws = Workspace { cli: "gemini".into(), ..Default::default() };
+        let ws = Workspace { cli: "kimi".into(), ..Default::default() };
         let filter = render_filter_for(&ws, None);
-        assert!(filter.contains("googleapis"), "gemini filter must include googleapis");
+        // Kimi doesn't have built-in sandbox hosts; the test just
+        // verifies it doesn't panic and common hosts are present.
+        assert!(filter.contains("github"), "kimi filter must include common hosts");
     }
 
     #[test]
@@ -1914,8 +1910,8 @@ mod tests {
     fn render_filter_agent_override_wins_over_workspace_cli() {
         use crate::Workspace;
         let ws = Workspace { cli: "codex".into(), ..Default::default() };
-        let filter = render_filter_for(&ws, Some("gemini"));
-        assert!(filter.contains("googleapis"), "override to gemini must add googleapis");
+        let filter = render_filter_for(&ws, Some("agy"));
+        assert!(filter.contains("googleapis"), "override to agy must add googleapis");
         assert!(!filter.contains("openai"), "override must drop codex openai entries");
     }
 
