@@ -2,7 +2,7 @@
 // updates (immutable replacements, not in-place mutations).
 
 import { create } from "zustand";
-import type { Project, Workspace, Tab, TerminalTab, GitHubStatus } from "@/lib/types";
+import type { Project, Workspace, Tab, TerminalTab, GitHubStatus, DiffInlineComment } from "@/lib/types";
 import * as ipc from "@/lib/ipc";
 import { focusTerminalTab } from "@/lib/tabFocus";
 import { agentDisplayName } from "@/lib/agents";
@@ -87,6 +87,18 @@ interface AppState {
   spotlightWsId: Record<string, string>;
   /** Set or clear the spotlighted workspace for a project. */
   setSpotlight: (projectId: string, wsId: string | null) => void;
+
+  /** Per-workspace inline diff comments, keyed by workspace id. Survives
+   *  diff-tab remounts (lives in the store, not the tab). */
+  diffComments: Record<string, DiffInlineComment[]>;
+  /** Insert a new comment. Returns the new id, or null if the body is
+   *  empty so the caller can show the inline error. */
+  addDiffComment: (wsId: string, path: string, side: "left" | "right", line: number, body: string) => string | null;
+  /** Replace the body of an existing comment. Returns false on empty body
+   *  so the caller can show the inline error without losing focus. */
+  updateDiffComment: (id: string, body: string) => boolean;
+  /** Remove a comment by id. No-op if not found. */
+  deleteDiffComment: (id: string) => void;
 
   // ── actions ──
   loadAll: () => Promise<void>;
@@ -214,6 +226,7 @@ export const useApp = create<AppState>((set, get) => ({
   detectedClis: {},
   githubStatus: null,
   spotlightWsId: {},
+  diffComments: {},
 
   setSpotlight: (projectId, wsId) =>
     set(s => ({
@@ -221,6 +234,52 @@ export const useApp = create<AppState>((set, get) => ({
         ? { ...s.spotlightWsId, [projectId]: wsId }
         : Object.fromEntries(Object.entries(s.spotlightWsId).filter(([k]) => k !== projectId)),
     })),
+
+  addDiffComment: (wsId, path, side, line, body) => {
+    const trimmed = body.trim();
+    if (!trimmed) return null;
+    const id = crypto.randomUUID();
+    set(s => ({
+      diffComments: {
+        ...s.diffComments,
+        [wsId]: [...(s.diffComments[wsId] ?? []), { id, path, side, line, body: trimmed }],
+      },
+    }));
+    return id;
+  },
+
+  updateDiffComment: (id, body) => {
+    const trimmed = body.trim();
+    if (!trimmed) return false;
+    set(s => {
+      let touched = false;
+      const nextMap: Record<string, DiffInlineComment[]> = {};
+      for (const [wid, list] of Object.entries(s.diffComments)) {
+        let touchedHere = false;
+        const next = list.map(c => {
+          if (c.id === id) { touchedHere = true; return { ...c, body: trimmed }; }
+          return c;
+        });
+        if (touchedHere) { touched = true; nextMap[wid] = next; } else { nextMap[wid] = list; }
+      }
+      if (!touched) return s;
+      return { diffComments: nextMap };
+    });
+    return true;
+  },
+
+  deleteDiffComment: (id) => {
+    set(s => {
+      let touched = false;
+      const nextMap: Record<string, DiffInlineComment[]> = {};
+      for (const [wid, list] of Object.entries(s.diffComments)) {
+        const next = list.filter(c => c.id !== id);
+        if (next.length !== list.length) { touched = true; nextMap[wid] = next; } else { nextMap[wid] = list; }
+      }
+      if (!touched) return s;
+      return { diffComments: nextMap };
+    });
+  },
 
   loadAll: async () => {
     // Pull projects + workspaces + settings (for the agent registry).
@@ -838,6 +897,7 @@ export const useApp = create<AppState>((set, get) => ({
 // inside the selector — Zustand 5 / React 19 will warn (or worse, loop) on
 // non-cached snapshots. We use a shared EMPTY constant for the "no tabs" case.
 const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
+const EMPTY_DIFF_COMMENTS: DiffInlineComment[] = Object.freeze([]) as unknown as DiffInlineComment[];
 
 export const useActiveWorkspace = () => useApp(s => {
   const id = s.activeWorkspaceId;
@@ -848,3 +908,7 @@ export const useWorkspaceTabs = (wsId: string | null | undefined) =>
   useApp(s => (wsId ? (s.tabs[wsId] ?? EMPTY_TABS) : EMPTY_TABS));
 export const useActiveTabId = (wsId: string | null | undefined) =>
   useApp(s => (wsId ? s.activeTab[wsId] : undefined));
+/** All diff comments for a workspace (flat list). Falls back to the frozen
+ *  EMPTY_DIFF_COMMENTS so the selector stays referentially stable. */
+export const useDiffComments = (wsId: string | null | undefined) =>
+  useApp(s => (wsId ? (s.diffComments[wsId] ?? EMPTY_DIFF_COMMENTS) : EMPTY_DIFF_COMMENTS));
