@@ -6,13 +6,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
-import { projectUpdate, projectRemove, projectSetMembers, projectAdd, repoConfigLoad, repoConfigSave, workspaceSpotlightStop } from "@/lib/ipc";
+import { projectUpdate, projectRemove, projectSetMembers, projectAdd, repoConfigLoad, repoConfigSave, workspaceSpotlightStop, externalDirLinkAdd, externalDirLinkRemove, workspaceRepairLinks } from "@/lib/ipc";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { Project, RepoConfig } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
-import { Trash2, Check, Layers, X, AudioWaveform } from "lucide-react";
+import { Trash2, Check, Layers, X, AudioWaveform, FolderSymlink, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function RepositorySection({ projectId }: { projectId: string }) {
@@ -292,6 +292,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   const tabs: { id: SubTab; label: string }[] = [
     { id: "scripts",  label: isMulti ? "Members & scripts" : "Scripts & run" },
     { id: "sandbox",  label: "Sandbox" },
+    { id: "links",    label: "Links" },
     { id: "advanced", label: "More" },
   ];
 
@@ -626,6 +627,13 @@ export function RepositorySection({ projectId }: { projectId: string }) {
         </div>
       )}
 
+      {subTab === "links" && (
+        <ExternalDirLinksSection
+          project={draft}
+          onChanged={() => { void loadAll(); }}
+        />
+      )}
+
       {subTab === "advanced" && (
         <div className="flex flex-col gap-7">
           <Field
@@ -698,7 +706,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   );
 }
 
-type SubTab = "scripts" | "sandbox" | "advanced";
+type SubTab = "scripts" | "sandbox" | "links" | "advanced";
 
 function Field({ label, hint, control }: { label: string; hint?: string; control: React.ReactNode }) {
   return (
@@ -1054,6 +1062,203 @@ function AddMemberPicker({ candidates, onAdd, onQuickAdd }: {
           </span>
         </button>
       )}
+    </div>
+  );
+}
+
+function ExternalDirLinksSection({ project, onChanged }: {
+  project: Project;
+  onChanged: () => void;
+}) {
+  const pushToast = useUI(s => s.pushToast);
+  const links = project.external_dir_links ?? [];
+  const [name, setName] = useState("");
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
+
+  const nameError = (() => {
+    const t = name.trim();
+    if (!t) return null;
+    if (t.includes("/")) return "no '/' allowed";
+    if (t.includes("..")) return "no '..' allowed";
+    if (t.startsWith(".")) return "cannot start with '.'";
+    if (links.some(l => l.name === t)) return "name already exists";
+    return null;
+  })();
+  const pathError = path.trim() ? null : "path is required";
+  const canAdd = !!name.trim() && !!path.trim() && !nameError && !busy;
+
+  async function pickDirectory() {
+    setErr(null);
+    const sel = await openDialog({ directory: true, multiple: false });
+    if (!sel || typeof sel !== "string") return;
+    setPath(sel);
+    if (!name.trim()) {
+      setName(sel.split("/").filter(Boolean).pop() ?? "");
+    }
+  }
+
+  async function add() {
+    if (!canAdd) return;
+    setBusy(true); setErr(null);
+    try {
+      await externalDirLinkAdd(project.id, name.trim(), path.trim());
+      pushToast(`Added link “${name.trim()}”`, "success");
+      setName(""); setPath("");
+      onChanged();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(linkName: string) {
+    setBusy(true); setErr(null);
+    try {
+      await externalDirLinkRemove(project.id, linkName);
+      pushToast(`Removed link “${linkName}”`, "success");
+      onChanged();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function repair() {
+    if (links.length === 0) {
+      pushToast("No external directory links to repair", "info");
+      return;
+    }
+    const ok = await useUI.getState().askConfirm({
+      title: `Repair symlinks for ${project.name}?`,
+      message: "Re-creates the external directory links inside every active workspace of this project. Real files at the link path are left alone.",
+      confirmLabel: "Repair",
+    });
+    if (!ok) return;
+    const firstWs = useApp.getState().workspaces.find(
+      w => w.project_id === project.id && !w.archived,
+    );
+    if (!firstWs) {
+      pushToast("No active workspaces to repair", "info");
+      return;
+    }
+    setRepairBusy(true); setErr(null);
+    try {
+      const lines = await workspaceRepairLinks(firstWs.id);
+      const applied = lines.filter(l => l.startsWith("applied:")).length;
+      const skipped = lines.filter(l => l.startsWith("skipped")).length;
+      const errored = lines.filter(l => l.startsWith("error:")).length;
+      if (errored > 0) {
+        pushToast(`Repaired with errors: ${applied} applied, ${skipped} skipped, ${errored} error${errored === 1 ? "" : "s"}`, "error");
+      } else if (skipped > 0) {
+        pushToast(`Repaired: ${applied} applied, ${skipped} skipped`, "info");
+      } else {
+        pushToast(`Repaired: ${applied} symlink${applied === 1 ? "" : "s"} created`, "success");
+      }
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRepairBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <div className="flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
+          <FolderSymlink className="h-4 w-4 text-[var(--color-accent)]" />
+          External directories
+        </div>
+        <div className="mt-0.5 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+          Symlinks placed inside every new and imported workspace, named after the link and pointing at the directory on disk. Useful for shared notes, fixtures, or any folder you want the agent to see alongside the worktree. Real files already at the link path are left alone.
+        </div>
+      </div>
+
+      {links.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-6 text-center text-[12.5px] text-[var(--color-fg-faint)]">
+          No external directories linked. Add one below.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {links.map(l => (
+            <div key={l.name} className="flex items-center gap-3 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-2">
+              <FolderSymlink className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13.5px] font-medium text-[var(--color-fg)]">{l.name}</div>
+                <div className="truncate font-mono text-[11.5px] text-[var(--color-fg-faint)]">{l.target_path}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => remove(l.name)}
+                disabled={busy}
+                title="Remove this link"
+                className="rounded p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-err)]/10 hover:text-[var(--color-err)] disabled:opacity-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-1)]/40 p-3">
+        <div className="text-[13px] font-medium text-[var(--color-fg)]">Add external directory</div>
+        <div className="mt-2 flex flex-col gap-2">
+          <div>
+            <label className="text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">Name</label>
+            <Input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="shared-docs"
+              data-testid="external-link-name"
+              autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+              className="mt-1 font-mono"
+            />
+            {nameError && <div className="mt-1 text-[11.5px] text-[var(--color-err)]">{nameError}</div>}
+          </div>
+          <div>
+            <label className="text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">Path</label>
+            <div className="mt-1 flex gap-2">
+              <Input
+                value={path}
+                onChange={e => setPath(e.target.value)}
+                placeholder="/Users/me/notes"
+                data-testid="external-link-path"
+                autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                className="min-w-0 flex-1 font-mono"
+              />
+              <Button variant="secondary" size="sm" type="button" onClick={pickDirectory} className="shrink-0">
+                Pick…
+              </Button>
+            </div>
+            {pathError && <div className="mt-1 text-[11.5px] text-[var(--color-err)]">{pathError}</div>}
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="primary" size="sm" onClick={add} disabled={!canAdd}>
+              {busy ? "Adding…" : "Add"}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-[var(--color-fg)]">Repair symlinks for all workspaces</div>
+          <div className="text-[11.5px] text-[var(--color-fg-faint)]">
+            Re-creates the links inside every active workspace of this project. Use after adding a link to update existing workspaces.
+          </div>
+        </div>
+        <Button variant="secondary" size="sm" onClick={repair} disabled={repairBusy} className="shrink-0">
+          <RefreshCw className={cn("h-3.5 w-3.5", repairBusy && "animate-spin")} />
+          {repairBusy ? "Repairing…" : "Repair"}
+        </Button>
+      </div>
+
+      {err && <div className="text-[12.5px] text-[var(--color-err)]">{err}</div>}
     </div>
   );
 }

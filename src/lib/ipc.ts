@@ -23,6 +23,22 @@ export const projectRemove  = (id: string) => invoke<void>("project_remove", { i
 export const projectReorder = (ids: string[]) => invoke<void>("project_reorder", { ids });
 export const projectRename  = (id: string, name: string) => invoke<void>("project_rename", { id, name });
 
+/** Add a {name, target_path} entry to `Project.external_dir_links`. */
+export const externalDirLinkAdd = (
+  projectId: string, name: string, targetPath: string,
+) => invoke<Project>("external_dir_link_add", { projectId, name, targetPath });
+
+/** Remove a link by name. Does not touch existing symlinks. */
+export const externalDirLinkRemove = (
+  projectId: string, name: string,
+) => invoke<Project>("external_dir_link_remove", { projectId, name });
+
+/** Re-create `external_dir_links` symlinks in every active workspace
+ *  of the project that owns `workspaceId`. Returns a list of human
+ *  readable result lines. */
+export const workspaceRepairLinks = (workspaceId: string) =>
+  invoke<string[]>("workspace_repair_links", { workspaceId });
+
 // ───────────────────────────── workspaces ─────────────────────────────
 
 export const workspacesList    = () => invoke<Workspace[]>("workspaces_list");

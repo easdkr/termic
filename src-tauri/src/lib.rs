@@ -1383,6 +1383,186 @@ fn project_update(p: Project) -> Result<(), String> {
     }
 }
 
+// ───────────────────────────── external directory links (Task 7) ─────────────────────────────
+//
+// `Project.external_dir_links` is a list of `{name, target_path}`
+// pointers to directories outside the worktree. New + imported
+// workspaces materialize each link as a symlink inside the worktree
+// so the file tree can surface the external dir as if it were a
+// sibling of the worktree contents. Skips with a warning if a real
+// file/dir already occupies the link path.
+
+/// Validate a user-supplied link name. Returns the trimmed name on
+/// success. Rejects empty, `/`, `..` anywhere in the name, and a
+/// leading `.` (which would create a hidden directory).
+fn validate_link_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("link name cannot be empty".into());
+    }
+    if trimmed.contains('/') {
+        return Err("invalid link name (no '/' allowed)".into());
+    }
+    if trimmed.contains("..") {
+        return Err("invalid link name (no '..' allowed)".into());
+    }
+    if trimmed.starts_with('.') {
+        return Err("invalid link name (cannot start with '.')".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Drop a symlink at `<worktree>/<link.name>` pointing at
+/// `link.target_path` for every entry in `proj.external_dir_links`.
+/// Returns a flat `Vec<String>` of outcome lines ("applied: …",
+/// "skipped (existing real path): …", "error: …") so the Repair
+/// command can surface a single batched report to the UI.
+fn materialize_external_dir_links(proj: &Project, wt_path: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for link in &proj.external_dir_links {
+        if link.name.is_empty() || link.target_path.is_empty() {
+            out.push(format!("skipped (empty entry): {}", link.name));
+            continue;
+        }
+        let target = wt_path.join(&link.name);
+        // `symlink_metadata` (vs. `metadata`) reports the symlink
+        // itself — we can detect "something exists here" without
+        // dereferencing into a missing target.
+        if target.symlink_metadata().is_ok() {
+            if let Ok(existing) = fs::read_link(&target) {
+                if existing == PathBuf::from(&link.target_path) {
+                    out.push(format!("exists (symlink OK): {}", link.name));
+                    continue;
+                }
+                eprintln!(
+                    "materialize_external_dir_links: {} is a symlink to {:?}, not {}; skipping",
+                    target.display(), existing, link.target_path
+                );
+                out.push(format!("skipped (existing symlink to different target): {}", link.name));
+                continue;
+            }
+            eprintln!(
+                "materialize_external_dir_links: {} exists and isn't our symlink; skipping {}",
+                target.display(), link.name
+            );
+            out.push(format!("skipped (existing real path): {}", link.name));
+            continue;
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&link.target_path, &target) {
+            eprintln!(
+                "materialize_external_dir_links: symlink {} -> {} failed: {e}",
+                link.name, link.target_path
+            );
+            out.push(format!("error: {} - {}", link.name, e));
+            continue;
+        }
+        out.push(format!("applied: {} -> {}", link.name, link.target_path));
+    }
+    out
+}
+
+/// Add an external directory link to a project. Validates the name
+/// (empty/`/`/`..`/leading-dot all rejected) and the target path
+/// (expands `~`, must be non-empty). Duplicate names return a
+/// specific error. The new link is persisted to `projects.json` and
+/// the updated `Project` is returned.
+#[tauri::command]
+fn external_dir_link_add(project_id: String, name: String, target_path: String) -> Result<Project, String> {
+    let name = validate_link_name(&name)?;
+    let target_trim = target_path.trim();
+    if target_trim.is_empty() {
+        return Err("link target path cannot be empty".into());
+    }
+    let target = if let Some(rest) = target_trim.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(rest).to_string_lossy().into_owned())
+            .unwrap_or_else(|| target_trim.to_string())
+    } else {
+        target_trim.to_string()
+    };
+    let mut list = load_projects();
+    let idx = list.iter().position(|p| p.id == project_id)
+        .ok_or("project not found")?;
+    if list[idx].external_dir_links.iter().any(|l| l.name == name) {
+        return Err(format!("link name '{}' already exists", name));
+    }
+    list[idx].external_dir_links.push(ExternalDirLink { name, target_path: target });
+    let result = list[idx].clone();
+    save_projects(&list).map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// Remove an external directory link from a project. Persists and
+/// returns the updated `Project`. Existing symlinks in workspaces
+/// are not removed (the next archive + recreate will clean them).
+#[tauri::command]
+fn external_dir_link_remove(project_id: String, name: String) -> Result<Project, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("link name cannot be empty".into());
+    }
+    let mut list = load_projects();
+    let idx = list.iter().position(|p| p.id == project_id)
+        .ok_or("project not found")?;
+    let before = list[idx].external_dir_links.len();
+    list[idx].external_dir_links.retain(|l| l.name != name);
+    if list[idx].external_dir_links.len() == before {
+        return Err(format!("link '{}' not found", name));
+    }
+    let result = list[idx].clone();
+    save_projects(&list).map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// Re-materialize the project's `external_dir_links` as symlinks in
+/// every active workspace of the project that owns `workspace_id`.
+/// Returns a flat list of human-readable result lines (one set per
+/// workspace, separated by header lines). Backs the "Repair
+/// symlinks for all workspaces" button.
+///
+/// Async + `spawn_blocking` per the long-running-IPC convention
+/// in CLAUDE.md: iterates all active workspaces of the project and
+/// may create a handful of symlinks per workspace.
+#[tauri::command]
+async fn workspace_repair_links(workspace_id: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let workspaces = load_workspaces();
+        let ws = workspaces.iter().find(|w| w.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        let project_id = ws.project_id.clone();
+        drop(workspaces);
+
+        let projects = load_projects();
+        let proj = projects.iter().find(|p| p.id == project_id)
+            .ok_or_else(|| "project not found".to_string())?;
+        let project_name = proj.name.clone();
+        let links_snapshot: Vec<ExternalDirLink> = proj.external_dir_links.clone();
+        drop(projects);
+
+        let siblings: Vec<Workspace> = load_workspaces().into_iter()
+            .filter(|w| w.project_id == project_id && !w.archived)
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        out.push(format!("Repair for project \"{}\" ({} active workspace{})",
+            project_name, siblings.len(), if siblings.len() == 1 { "" } else { "s" }));
+        if links_snapshot.is_empty() {
+            out.push("(no external directory links configured for this project)".into());
+        }
+        let proj_for_helper = Project {
+            id: project_id.clone(),
+            name: project_name.clone(),
+            external_dir_links: links_snapshot,
+            ..Project::default()
+        };
+        for sib in &siblings {
+            out.push(format!("--- workspace \"{}\" ({}) ---", sib.name, sib.id));
+            let p = PathBuf::from(&sib.path);
+            out.extend(materialize_external_dir_links(&proj_for_helper, &p));
+        }
+        Ok(out)
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Remove a project AND archive every workspace under it (kills running
 /// scripts, removes git worktrees, wipes the worktree dirs). Off-thread —
 /// can take seconds on big repos. Workspaces' JSON files are also deleted
@@ -1723,6 +1903,7 @@ fn workspace_import_worktree(
         custom_command: None,
     };
     save_workspace(&ws).map_err(|e| e.to_string())?;
+    let _ = materialize_external_dir_links(&proj, &wt);
     Ok(ws)
 }
 
@@ -1884,6 +2065,10 @@ fn workspace_create_sync(app: AppHandle, args: CreateWorkspaceArgs) -> Result<Wo
     for pat in &effective_files_to_copy(&proj) {
         copy_matching(&repo, &wt_path, pat);
     }
+
+    // Project-level external directory links → symlinks in the new
+    // worktree. Helper logs and skips any real-file collisions.
+    let _ = materialize_external_dir_links(&proj, &wt_path);
 
     // Allocate port (18100 + index).
     let port = 18100 + (load_workspaces().len() as u16);
@@ -5783,6 +5968,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder,
+            external_dir_link_add, external_dir_link_remove, workspace_repair_links,
             workspaces_list, workspace_create, workspace_create_multi, workspace_open_repo, workspace_importable_worktrees, workspace_import_worktree, workspace_archive, workspace_set_cli, workspace_set_custom_command, workspace_set_sandbox,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, workspace_sandbox_add_allowed_host, workspace_sandbox_add_allowed_path, workspace_sandbox_remove_allowed_path, workspace_recent_denials, workspace_test_sandbox,
             repo_config_load, repo_config_save, repo_config_scaffold, repo_config_add_allowed_host, repo_config_add_allowed_path,
@@ -6339,5 +6525,68 @@ mod tests {
         // The branch ref STILL hasn't moved through all of this.
         assert_eq!(git_rev(main, "main"), main_ref_before, "main ref never moved");
         assert_eq!(git_head(main), git_head(&wt), "repo root HEAD == worktree HEAD");
+    }
+
+    fn link_proj(names_paths: &[(&str, &str)]) -> Project {
+        Project {
+            id: "p1".into(),
+            name: "test".into(),
+            external_dir_links: names_paths.iter()
+                .map(|(n, p)| ExternalDirLink { name: (*n).into(), target_path: (*p).into() })
+                .collect(),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn validate_link_name_rejects_bad_inputs() {
+        assert!(validate_link_name("").is_err());
+        assert!(validate_link_name("   ").is_err());
+        assert!(validate_link_name("a/b").is_err());
+        assert!(validate_link_name("../secrets").is_err());
+        assert!(validate_link_name("a..b").is_err());
+        assert!(validate_link_name(".hidden").is_err());
+        assert!(validate_link_name(".").is_err());
+        assert!(validate_link_name("shared-docs").is_ok());
+        assert!(validate_link_name("notes_2024").is_ok());
+        assert!(validate_link_name("  shared-docs  ").is_ok());
+    }
+
+    #[test]
+    fn materialize_applies_symlink_for_valid_link() {
+        let wt = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let proj = link_proj(&[("shared-docs", target.path().to_str().unwrap())]);
+        let out = materialize_external_dir_links(&proj, wt.path());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("applied: shared-docs"));
+        let link = wt.path().join("shared-docs");
+        assert!(link.symlink_metadata().is_ok(), "symlink should exist");
+        let resolved = fs::read_link(&link).unwrap();
+        assert_eq!(resolved, target.path());
+    }
+
+    #[test]
+    fn materialize_skips_when_real_file_occupies_link_path() {
+        let wt = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let collision = wt.path().join("shared-docs");
+        fs::write(&collision, "do not clobber me\n").unwrap();
+        let proj = link_proj(&[("shared-docs", target.path().to_str().unwrap())]);
+        let out = materialize_external_dir_links(&proj, wt.path());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("skipped (existing real path)"));
+        assert_eq!(fs::read_to_string(&collision).unwrap(), "do not clobber me\n");
+    }
+
+    #[test]
+    fn materialize_is_noop_when_symlink_already_correct() {
+        let wt = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), wt.path().join("shared-docs")).unwrap();
+        let proj = link_proj(&[("shared-docs", target.path().to_str().unwrap())]);
+        let out = materialize_external_dir_links(&proj, wt.path());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("exists (symlink OK)"));
     }
 }
