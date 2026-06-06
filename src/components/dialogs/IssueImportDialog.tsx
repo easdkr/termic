@@ -23,6 +23,7 @@ import { githubIssueFetch, linearIssueFetch, workspaceCreate } from "@/lib/ipc";
 import { slugify, cn } from "@/lib/utils";
 import { Loader2, GitBranch, AlertTriangle, ExternalLink, Check } from "lucide-react";
 import type { IssueSeed } from "@/lib/types";
+import { ghErrorToToastText } from "@/lib/errors";
 
 type FetchState =
   | { kind: "idle" }
@@ -197,7 +198,15 @@ export function IssueImportDialog() {
       setName(seed.title);
       setBranchEdited(false);
     } catch (e) {
-      setFetchState({ kind: "err", message: String(e) });
+      const msg = String(e);
+      setFetchState({ kind: "err", message: msg });
+      // Task 18: also surface the failure as a toast so the user
+      // gets a notification even if they have the dialog behind
+      // another window. The inline error stays for context; the
+      // helper normalizes the gh error codes into friendly text
+      // (e.g. "Run `gh auth login` to connect to GitHub.").
+      const t = ghErrorToToastText(msg);
+      useUI.getState().pushToast(t.message, t.severity);
     }
   }
 

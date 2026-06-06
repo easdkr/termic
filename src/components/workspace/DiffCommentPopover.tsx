@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { githubPrPostDiffComment } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { ghErrorToToastText } from "@/lib/errors";
 import type { DiffInlineComment } from "@/lib/types";
 
 interface PopoverAnchor {
@@ -198,12 +199,12 @@ export function DiffCommentPopover({ wsId, path, side, line, anchor, onClose }: 
       markPosted(wsId, c.id, remoteId, new Date().toISOString());
       pushToast(`Comment posted to PR #${pr.number}`, "success");
     } catch (e) {
-      // Map the stable error-code prefix to a toast kind — same
-      // mapping the Merge button uses (Task 13).
-      const msg = String(e);
-      const code = msg.split(":", 1)[0];
-      const kind = code === "gh_unauthenticated" || code === "gh_unavailable" ? "info" : "error";
-      pushToast(msg, kind);
+      // Task 18: route the gh error through the helper so the
+      // "post to GitHub" toast uses the same friendly text as
+      // the merge / fetch / create paths. `gh_error:` falls
+      // through to the raw stderr text per the helper's spec.
+      const t = ghErrorToToastText(String(e));
+      pushToast(t.message, t.severity);
     } finally {
       setPosting(prev => {
         const { [c.id]: _drop, ...rest } = prev;

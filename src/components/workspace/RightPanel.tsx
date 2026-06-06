@@ -24,10 +24,18 @@ import { FileTree } from "./FileTree";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { useScriptRuns, useRunState, type RunStatus } from "@/store/scriptRuns";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem } from "@/components/ui/Dropdown";
+import { ghErrorToToastText } from "@/lib/errors";
 
 const STATUS_LABEL: Record<string, string> = { M: "modified", A: "added", D: "deleted", R: "renamed", "??": "untracked", "!!": "ignored", U: "conflict" };
 const STATUS_COLOR: Record<string, string> = { M: "var(--color-accent)", A: "var(--color-ok)", D: "var(--color-err)", R: "var(--color-accent)", "??": "var(--color-ok)", U: "var(--color-err)" };
 const STATUS_CHAR: Record<string, string> = { M: "M", A: "+", "??": "+", D: "D", R: "R", U: "U", "!!": "!" };
+
+// Checks-tab polling cadence (Task 16). 30s relaxed default; 5s aggressive
+// when any check is still in flight. Tightening beyond 5s would hammer the
+// GitHub API for a long-running check; loosening beyond 30s would make the
+// relaxed state feel "stuck" after a check finishes.
+const CHECKS_RELAXED_MS = 30_000;
+const CHECKS_AGGRESSIVE_MS = 5_000;
 
 type FootTab = "setup" | "run" | "term" | "spotlight" | "checks";
 
@@ -143,6 +151,12 @@ export function RightPanel() {
   const footerTerm = useApp(s => (ws ? !!s.footerTerm[ws.id] : false));
   const setupRunState = useRunState(ws?.id, "setup", footTarget);
   const runRunState   = useRunState(ws?.id, "run",   footTarget);
+  // Checks-tab per-status badge (Task 16). Reads the same `usePrChecks`
+  // snapshot ChecksContent writes into. `pr === null` (no PR) reads as
+  // an empty checks list and `checksDotColor` returns null, so the
+  // FTab doesn't show a misleading dot.
+  const prChecks = usePrChecks(ws?.id);
+  const checksDot = ws ? checksDotColor(prChecks.checks) : null;
   // The Setup tab is transient: it only appears once Setup has been
   // invoked for this (workspace, target). Closing it resets the run
   // state back to idle and the tab disappears again.
@@ -451,6 +465,7 @@ export function RightPanel() {
                     icon={<GitPullRequest className="h-3 w-3" />}
                     active={footTab === "checks"}
                     onClick={() => setFootTab("checks")}
+                    dotColor={checksDot}
                   />
                   {footTab === "checks" ? (
                     <ChecksRefreshButton ws={ws} />
@@ -531,6 +546,7 @@ export function RightPanel() {
             icon={<GitPullRequest className="h-3 w-3" />}
             active={footTab === "checks"}
             onClick={() => { setFootTab("checks"); setFootCollapsed(false); }}
+            dotColor={checksDot}
           />
           {/* Right-side controls depend on tab + spotlight state */}
           {footTab === "spotlight" && isSpotlighted ? (
@@ -649,8 +665,13 @@ export function RightPanel() {
   );
 }
 
-function FTab({ label, icon, active, onClick, onClose }: {
+function FTab({ label, icon, active, onClick, onClose, dotColor }: {
   label: string; icon?: React.ReactNode; active: boolean; onClick: () => void; onClose?: () => void;
+  /** Optional status dot rendered to the right of the label. Drives
+   *  the Checks-tab per-status badge (Task 16). The dot pulses for
+   *  the "warn" / in-flight color so the user notices when a check
+   *  is still running without having to open the tab. */
+  dotColor?: "ok" | "warn" | "err" | null;
 }) {
   return (
     <div
@@ -665,6 +686,7 @@ function FTab({ label, icon, active, onClick, onClose }: {
     >
       <button onClick={onClick} className="flex items-center gap-1 px-1.5 py-1">
         {icon}{label}
+        {dotColor && <ChecksDot color={dotColor} />}
       </button>
       {onClose && (
         <button
@@ -675,6 +697,40 @@ function FTab({ label, icon, active, onClick, onClose }: {
       )}
     </div>
   );
+}
+
+/** Per-status dot for the Checks tab (Task 16). Same shape as the
+ *  footer StatusDot for running scripts but with a third color
+ *  (`warn` for in-flight, `err` for failure, `ok` for green) and a
+ *  pulsing animation on `warn` so the user notices a still-running
+ *  check without opening the tab. Rendered as a span next to the
+ *  tab label so it disappears with the FTab itself. */
+function ChecksDot({ color }: { color: "ok" | "warn" | "err" }) {
+  const bg = color === "ok" ? "var(--color-ok)"
+    : color === "warn" ? "var(--color-warn)"
+    : "var(--color-err)";
+  return (
+    <span
+      data-testid="checks-status-dot"
+      data-status={color}
+      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", color === "warn" && "animate-pulse")}
+      style={{ background: bg }}
+    />
+  );
+}
+
+/** Compute the worst status across the visible checks for the
+ *  Checks-tab badge (Task 16). Precedence: failure > in-flight > done.
+ *  Other conclusions (skipped / neutral / cancelled / timed_out /
+ *  action_required / stale) are treated as "done" (not failing) and
+ *  the badge is green. Returns null when there are no checks to
+ *  evaluate (no PR, or PR has no checks yet) so the FTab doesn't show
+ *  a misleading dot. */
+function checksDotColor(checks: GitHubCheckRun[]): "ok" | "warn" | "err" | null {
+  if (checks.length === 0) return null;
+  if (checks.some(c => c.conclusion === "failure")) return "err";
+  if (checks.some(c => c.status === "in_progress" || c.status === "queued")) return "warn";
+  return "ok";
 }
 
 // Width reserved for the "+N" overflow trigger when some members don't
@@ -1441,22 +1497,27 @@ function SpotlightContent({
 
 /** Refresh button for the Checks tab — same icon + placement as
  *  Spotlight's Resync. Disabled while a fetch is in flight; the
- *  `data-testid` is the QA hook the plan spec references. */
+ *  `data-testid` is the QA hook the plan spec references. The button
+ *  fires its own one-shot IPC call (not a re-trigger of the polling
+ *  effect) so the user gets an immediate response without waiting
+ *  for the next polling tick. */
 function ChecksRefreshButton({ ws }: { ws: Workspace }) {
   const data = usePrChecks(ws.id);
-  // We don't auto-trigger a fetch here (the parent component does that
-  // on mount). The button is a manual re-fetch only — the store flag
-  // tells us whether to disable.
   const loading = data.loading;
+  const handleRefresh = async () => {
+    if (loading) return;
+    useApp.getState().setPrChecksLoading(ws.id, true);
+    try {
+      const bundle = await githubPrChecksFetch(ws.project_id, ws.branch);
+      useApp.getState().setPrChecks(ws.id, { pr: bundle.pr, checks: bundle.checks, error: null });
+    } catch (err) {
+      useApp.getState().setPrChecks(ws.id, { pr: null, checks: [], error: String(err) });
+    }
+  };
   return (
     <button
       data-testid="checks-refresh"
-      onClick={() => {
-        // Bump loading optimistically; the actual fetch is fired by
-        // the ChecksContent effect that watches the loading flag
-        // transition. We just kick the in-flight indicator.
-        useApp.getState().setPrChecksLoading(ws.id, true);
-      }}
+      onClick={handleRefresh}
       disabled={loading}
       title={loading ? "Refreshing checks…" : "Refresh checks"}
       className={cn(
@@ -1541,42 +1602,90 @@ function CheckRunRow({ check }: { check: GitHubCheckRun }) {
 
 /** The Checks tab body: PR header (title + link + branch/state) +
  *  flat list of check runs, with empty / error states per the plan's
- *  QA scenarios. Fetches on mount + manual refresh (the refresh
- *  button sets `loading: true`; this component's effect fires the
- *  actual fetch when `loading` flips to true). */
+ *  QA scenarios. Polls with a relaxed/aggressive cadence (Task 16);
+ *  the manual refresh button fires its own one-shot IPC so the user
+ *  gets an immediate response without waiting for the next tick. */
 function ChecksContent({ ws }: { ws: Workspace }) {
   const data = usePrChecks(ws.id);
   const setPrChecks = useApp(s => s.setPrChecks);
   const setPrChecksLoading = useApp(s => s.setPrChecksLoading);
 
-  // Mount fetch + "tab focus" fetch + manual refresh fetch.
-  // `loading` is the trigger — any time it transitions to true we
-  // fire the IPC. The store's `setPrChecksLoading(wsId, true)` is the
-  // only path that sets it; the refresh button calls it, and the
-  // effect below calls it on (re)mount.
+  // ── polling (Task 16) ─────────────────────────────────────────
+  // Self-scheduling timer: after each fetch, decide the next delay
+  // from the result. 5s aggressive while a check is in flight, 30s
+  // relaxed otherwise. `cancelled` is the standard unmount guard;
+  // the timer is cleared in the cleanup so unmounting the Checks
+  // tab (or the whole right panel when switching workspaces) stops
+  // the polling immediately.
+  //
+  // Note: `data.loading` is intentionally NOT in the dep array.
+  // The polling effect's own transitions (loading true→false on
+  // every fetch) would otherwise re-trigger the effect, causing
+  // back-to-back duplicate fetches. The manual refresh button
+  // (`ChecksRefreshButton`) does its own one-shot IPC and updates
+  // the same store slot, so the two paths don't share state.
+  //
+  // Focus-gate: skip the initial mount if this workspace isn't the
+  // active one. The current architecture (RightPanel renders only
+  // for the active workspace) makes this redundant today; the
+  // explicit check mirrors `useAttentionNotifier`'s pattern so a
+  // future change that keeps the RightPanel mounted for inactive
+  // workspaces won't accidentally poll in the background.
   useEffect(() => {
+    if (useApp.getState().activeWorkspaceId !== ws.id) return;
     let cancelled = false;
-    setPrChecksLoading(ws.id, true);
-    githubPrChecksFetch(ws.project_id, ws.branch)
-      .then(bundle => {
+    let timer: number | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      setPrChecksLoading(ws.id, true);
+      try {
+        const bundle = await githubPrChecksFetch(ws.project_id, ws.branch);
         if (cancelled) return;
         setPrChecks(ws.id, { pr: bundle.pr, checks: bundle.checks, error: null });
-      })
-      .catch(err => {
+        // Schedule the next poll: aggressive while any check is in
+        // flight, relaxed otherwise. Errors fall back to relaxed so
+        // we don't hammer a broken IPC.
+        const anyInFlight = bundle.checks.some(
+          c => c.status === "in_progress" || c.status === "queued",
+        );
+        schedule(anyInFlight ? CHECKS_AGGRESSIVE_MS : CHECKS_RELAXED_MS);
+      } catch (err) {
         if (cancelled) return;
-        // The Rust side returns Err as "<code>: <message>" — we keep
-        // the whole string so the UI can match on the code prefix AND
-        // show the human message (e.g. in a toast on the next render).
         setPrChecks(ws.id, { pr: null, checks: [], error: String(err) });
-      });
-    return () => { cancelled = true; };
-  // Re-run on branch / project change. The loading-flag-bump also
-  // triggers a re-run via the same path; the dep array is `ws.id,
-  // ws.project_id, ws.branch` to make those re-runs explicit.
-  }, [ws.id, ws.project_id, ws.branch, data.loading, setPrChecks, setPrChecksLoading]);
+        schedule(CHECKS_RELAXED_MS);
+      }
+    };
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      timer = window.setTimeout(tick, delay);
+    };
+
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [ws.id, ws.project_id, ws.branch, setPrChecks, setPrChecksLoading]);
 
   // ── error states ───────────────────────────────────────────────
   const err = data.error;
+
+  // Task 18: also surface fetch errors as a toast so the user
+  // doesn't miss them if they switched tabs after the fetch
+  // failed. The inline error state below is the primary UI when
+  // the Checks tab is visible; the toast is the fallback for
+  // when the user has navigated elsewhere. Dedup by
+  // `${fetchedAt}:${err}` so we toast exactly once per failed
+  // fetch (not on every re-render). Sits at the top of the
+  // component to obey the rules of hooks.
+  const toastSig = err ? `${data.fetchedAt ?? 0}:${err}` : null;
+  useEffect(() => {
+    if (!toastSig) return;
+    const t = ghErrorToToastText(err!);
+    useUI.getState().pushToast(t.message, t.severity);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toastSig]);
   if (err) {
     const code = err.split(":", 1)[0];
     if (code === "gh_unavailable" || code === "gh_unauthenticated") {
@@ -1595,7 +1704,6 @@ function ChecksContent({ ws }: { ws: Workspace }) {
             )}
           </p>
           <Button size="sm" variant="secondary" onClick={() => {
-            // Re-bump loading so the useEffect refires the fetch.
             useApp.getState().setPrChecksLoading(ws.id, true);
           }} className="gap-1.5">
             <RefreshCw className="h-3 w-3" /> Try again
@@ -1735,14 +1843,13 @@ function ChecksContent({ ws }: { ws: Workspace }) {
       // Same loading-flag-bump pattern the refresh button uses.
       setPrChecksLoading(ws.id, true);
     } catch (err) {
-      // Stable-error-code prefix match, same as the empty-state
-      // branch above. Unknown codes land in the generic toast.
-      const msg = String(err);
-      const code = msg.split(":", 1)[0];
-      const kind: "error" | "info" = code === "gh_unauthenticated" || code === "gh_unavailable"
-        ? "info"
-        : "error";
-      useUI.getState().pushToast(msg, kind);
+      // Task 18: route the gh error through the helper so the
+      // user gets the same friendly text on the merge toast as
+      // they would on the fetch error path (and on the issue
+      // import + PR create dialogs). `gh_error:` falls through
+      // to the raw stderr text per the helper's spec.
+      const t = ghErrorToToastText(String(err));
+      useUI.getState().pushToast(t.message, t.severity);
     } finally {
       setMerging(false);
     }

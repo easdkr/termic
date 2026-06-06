@@ -24,6 +24,7 @@ import { Checkbox } from "@/components/ui/Checkbox";
 import { githubPrCreate, openPath, workspaceDiff } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { Loader2, GitPullRequest, AlertTriangle, ExternalLink, Check } from "lucide-react";
+import { ghErrorToToastText } from "@/lib/errors";
 
 type SubmitState =
   | { kind: "idle" }
@@ -144,6 +145,14 @@ export function PrCreateDialog() {
     } catch (e) {
       const msg = String(e);
       setSubmit({ kind: "err", message: msg });
+      // Task 18: also surface the failure as a toast. The inline
+      // error stays for context (and the GH-specific install/auth
+      // hints below it, which the dialog already handles); the
+      // toast is the friendly normalized version the helper
+      // returns. Matches the IssueImportDialog and Checks-tab
+      // patterns.
+      const t = ghErrorToToastText(msg);
+      pushToast(t.message, t.severity);
     } finally {
       submittingRef.current = false;
     }
