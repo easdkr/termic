@@ -107,6 +107,17 @@ pub struct Project {
     /// existing project + the `Default` impl stay git-backed.
     #[serde(default)]
     pub non_git: bool,
+
+    /// Project-level references to directories on disk that the user
+    /// wants the workspace's file tree to expose alongside the
+    /// worktree. Each entry is a stable, user-chosen name + an
+    /// absolute path. The sandbox / worktree itself is untouched —
+    /// these are virtual, read-only-ish links. Persisted on the
+    /// Project so they survive workspace archive + recreate.
+    /// `#[serde(default)]` so projects.json rows written before this
+    /// field existed still deserialize.
+    #[serde(default)]
+    pub external_dir_links: Vec<ExternalDirLink>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -280,6 +291,118 @@ pub enum MemberMode {
     #[default]
     Worktree,
     RepoRoot,
+}
+
+// ───────────────────────────── shared feature types (Task 1) ─────────────────────────────
+//
+// Persistence shapes shared with the frontend (`src/lib/types.ts`).
+// All are `#[serde(default)]` so adding a new field to an existing
+// on-disk struct (`Project`, `Settings`) can't break pre-existing
+// files. Snake_case field names match the JSON contract the TS side
+// expects.
+
+/// A user-named pointer to a directory outside the worktree that the
+/// file tree should surface as if it were a sibling of the worktree
+/// contents. Persisted on `Project.external_dir_links`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ExternalDirLink {
+    /// Display name shown in the file tree. Unique within a project.
+    pub name: String,
+    /// Absolute path to the directory on disk.
+    pub target_path: String,
+}
+
+/// One row in a PR's "Checks" panel. Mirrors the `check_runs[]`
+/// payload returned by GitHub's REST API (subset of fields we
+/// actually surface in the UI).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubCheckRun {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    /// Null while the check is still queued / running.
+    pub conclusion: Option<String>,
+    pub started_at: String,
+    /// Null while the check is still running.
+    pub completed_at: Option<String>,
+    pub html_url: String,
+}
+
+/// Snapshot of a pull request we show alongside a workspace. Pulled
+/// via `gh pr view --json ...` — no token persisted, no OAuth.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubPullRequest {
+    pub number: u64,
+    pub title: String,
+    /// Null when the PR body is empty on the GitHub side.
+    pub body: Option<String>,
+    pub state: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub html_url: String,
+    pub draft: bool,
+    /// Derived: every `check_run` has a non-failing conclusion. `None`
+    /// when no checks have run yet (UI shows a neutral state).
+    pub checks_passing: Option<bool>,
+}
+
+/// Source of an `IssueSeed` — which external system the import
+/// dialog parsed the URL from. Persisted on the workspace as a
+/// breadcrumb the agent reads on first spawn.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueSource {
+    #[default]
+    Github,
+    Linear,
+}
+
+/// Input shape for "seed a workspace from an issue". Filled in by
+/// the issue-import dialog; persisted on the workspace as the
+/// breadcrumb the agent reads on first spawn.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct IssueSeed {
+    pub source: IssueSource,
+    pub url: String,
+    pub title: String,
+    /// Null when the issue body is empty.
+    pub body: Option<String>,
+}
+
+/// Which side of a diff a `DiffInlineComment` is anchored to. Maps
+/// 1:1 to the GitHub `side` parameter on the review-comments API.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// One inline review comment anchored to a diff hunk. Lives in
+/// workspace-scoped state (NOT the on-disk `Workspace` struct — a
+/// workspace can accumulate many of these), but the shape is
+/// defined here so frontend + Rust agree.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DiffInlineComment {
+    /// Local UUID, assigned at draft time.
+    pub id: String,
+    /// Repo-relative file path. Matches `DiffTab.path`.
+    pub path: String,
+    /// 1-based line number within the chosen side.
+    pub line: u32,
+    pub side: DiffSide,
+    pub body: String,
+    /// GitHub review-comment id, populated after `gh api` posts it.
+    /// `None` while the comment is still local.
+    pub remote_id: Option<u64>,
+    /// ISO-8601 timestamp of when `remote_id` was assigned.
+    pub posted_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1035,6 +1158,7 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         members: Vec::new(),
         spotlight_enabled: false,
         non_git,
+        external_dir_links: Vec::new(),
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
@@ -1193,6 +1317,7 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         members,
         spotlight_enabled: false,
         non_git,
+        external_dir_links: Vec::new(),
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
@@ -4677,6 +4802,13 @@ pub struct Settings {
     /// editing these later only affects NEW workspaces.
     pub sandbox_default_rw_paths: Vec<String>,
     pub sandbox_default_allowed_hosts: Vec<String>,
+    /// Cached snapshot of the local `gh` CLI status — whether the binary
+    /// is on PATH and whether `gh auth status` exits 0. The Rust side
+    /// re-checks on demand; this is a non-stale hint the UI shows (e.g.
+    /// for the "Open PR" affordance). Missing = the check hasn't been
+    /// run yet, NOT "not installed".
+    #[serde(default)]
+    pub github_status: Option<GithubStatus>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5236,6 +5368,129 @@ pub struct CliInfo {
     pub version: String,
 }
 
+/// Snapshot of `gh` CLI presence + github.com auth. Drives the
+/// "GitHub connected / not connected" badges on the upcoming first-class
+/// git surface. Cheap enough to call from `loadAll` (one `which` plus at
+/// most one `gh auth status`).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GithubStatus {
+    /// True if the `gh` binary is somewhere on PATH.
+    pub available: bool,
+    /// True if `gh` is logged into github.com. Only meaningful when
+    /// `available` is true; on a missing `gh` we short-circuit and
+    /// leave this false (no `gh auth status` call to make).
+    pub authenticated: bool,
+    /// github.com username, when `authenticated`. None otherwise.
+    /// Pulled from `gh auth status` output — we never store tokens.
+    pub username: Option<String>,
+}
+
+/// Resolve the `gh` binary. macOS/Linux use `which`; Windows would use
+/// `where` but the project's primary targets are macOS/Linux today so
+/// this stays simple. Returns the resolved path, or empty on miss.
+fn gh_resolve_path() -> String {
+    // Bind the `Command` to a `let` so the temporary lives long enough
+    // for `probe.output()` to borrow from it (rustc E0716 catches the
+    // implicit-drop variant of this if/else form).
+    let mut probe: Command = if cfg!(target_os = "windows") {
+        let mut c = Command::new("where");
+        c.arg("gh");
+        c
+    } else {
+        let mut c = Command::new("which");
+        c.arg("gh");
+        c
+    };
+    probe.output().ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+/// Parse `gh auth status` output. The CLI prints something like:
+///
+///     github.com
+///       ✓ Logged in to github.com as octocat (/Users/x/.config/gh/hosts.yml)
+///
+/// Username extraction uses the "as <name>" pattern, which has been
+/// stable across gh versions. Case-insensitive on "Logged in" / "as" /
+/// "github.com" to tolerate minor stylistic drift in future versions.
+fn parse_gh_auth_output(stdout: &str) -> Option<String> {
+    let lower = stdout.to_lowercase();
+    if !lower.contains("github.com") { return None; }
+    for line in stdout.lines() {
+        let l = line.trim();
+        if l.is_empty() { continue; }
+        if !l.to_lowercase().contains("logged in") { continue; }
+        if !l.to_lowercase().contains("github.com") { continue; }
+        if let Some(idx) = l.to_lowercase().find(" as ") {
+            let after = &l[idx + 4..];
+            let name: String = after
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect::<String>()
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                .to_string();
+            if !name.is_empty() { return Some(name); }
+        }
+    }
+    None
+}
+
+/// Probe `gh auth status` (no network when already authed — `gh` uses
+/// the cached token). Returns (authenticated, username).
+fn gh_probe_auth() -> (bool, Option<String>) {
+    // Capture both stdout AND stderr — the "Logged in to github.com as
+    // X" line moves between streams across gh versions, and a regex
+    // pass is cheaper than pinning to a specific stream.
+    let out = Command::new("gh")
+        .args(["auth", "status"])
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(_) => return (false, None),
+    };
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push('\n');
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() {
+        // Some gh versions exit 1 even when auth succeeded but a
+        // secondary check (token scopes, protocol) failed. If we can
+        // still parse a username, trust it.
+        if let Some(u) = parse_gh_auth_output(&combined) {
+            return (true, Some(u));
+        }
+        return (false, None);
+    }
+    match parse_gh_auth_output(&combined) {
+        Some(u) => (true, Some(u)),
+        None => (false, None),
+    }
+}
+
+fn github_status_blocking() -> GithubStatus {
+    let path = gh_resolve_path();
+    if path.is_empty() {
+        return GithubStatus { available: false, authenticated: false, username: None };
+    }
+    let (authenticated, username) = gh_probe_auth();
+    GithubStatus { available: true, authenticated, username }
+}
+
+/// IPC entry: returns the current `gh` install + auth snapshot. Async +
+/// spawn_blocking per the long-running-IPC discipline — even though the
+/// individual subprocesses are fast, they CAN take 200-500ms on a cold
+/// PATH / uncached token and we don't want to be on the IPC thread
+/// when that happens. The frontend's `loadAll` already runs async, so
+/// this is non-blocking at startup.
+#[tauri::command]
+async fn github_status() -> GithubStatus {
+    tauri::async_runtime::spawn_blocking(github_status_blocking)
+        .await
+        .unwrap_or_default()
+}
+
 /// Enumerate every installed monospace font family on the system. Used by
 /// the Appearance picker so the user sees all real options, not just our
 /// curated probe list. Cached in-process via OnceLock.
@@ -5540,7 +5795,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts,
+            list_monospace_fonts, github_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

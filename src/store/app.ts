@@ -2,7 +2,7 @@
 // updates (immutable replacements, not in-place mutations).
 
 import { create } from "zustand";
-import type { Project, Workspace, Tab, TerminalTab } from "@/lib/types";
+import type { Project, Workspace, Tab, TerminalTab, GitHubStatus } from "@/lib/types";
 import * as ipc from "@/lib/ipc";
 import { focusTerminalTab } from "@/lib/tabFocus";
 import { agentDisplayName } from "@/lib/agents";
@@ -76,6 +76,11 @@ interface AppState {
    *  pickers are never stranded before/without detection. Drives the
    *  install badge in Settings and the hide-uninstalled picker filter. */
   detectedClis: Record<string, import("@/lib/types").CliInfo>;
+  /** Latest snapshot of the local `gh` CLI — whether the binary is on
+   *  PATH and whether `gh auth status` succeeds for github.com. Null
+   *  until `refreshGithubStatus` first resolves (the IPC is fast but
+   *  still async; UI gates must tolerate the null state). */
+  githubStatus: GitHubStatus | null;
   /** Per-project spotlight: project_id → ws_id of the currently spotlighted
    *  workspace, or absent if none. Updated by spotlight://status events and
    *  hydrated from the Rust side on app start. Session-only (not persisted). */
@@ -89,6 +94,10 @@ interface AppState {
    *  startup (App mount) and whenever Settings → Agent CLIs opens —
    *  deliberately NOT on every window focus. */
   refreshClis: () => Promise<void>;
+  /** Re-probe the local `gh` CLI for install + github.com auth. Fired
+   *  from `loadAll` (and the settings dialog can call it again after
+   *  the user runs `gh auth login`). */
+  refreshGithubStatus: () => Promise<void>;
   setActiveWorkspace: (id: string | null) => void;
   setView: (page: View["page"]) => void;
   openSettings: (tab?: View["settingsTab"], repoId?: string) => void;
@@ -203,6 +212,7 @@ export const useApp = create<AppState>((set, get) => ({
   collapsedWorkspaces: initialCollapsedWs as Record<string, boolean>,
   agents: [],
   detectedClis: {},
+  githubStatus: null,
   spotlightWsId: {},
 
   setSpotlight: (projectId, wsId) =>
@@ -223,6 +233,10 @@ export const useApp = create<AppState>((set, get) => ({
       ipc.settingsLoad().catch(() => ({ agents: [] } as Partial<import("@/lib/types").Settings>)),
     ]);
     set({ projects, workspaces, agents: (settings.agents as import("@/lib/types").Agent[]) ?? [] });
+    // Fire-and-forget: probes `gh` PATH presence + auth. Non-blocking
+    // (the IPC itself is async on the Rust side); `githubStatus` stays
+    // null until it resolves and UI gates must tolerate that.
+    void get().refreshGithubStatus();
   },
 
   refreshClis: async () => {
@@ -233,6 +247,17 @@ export const useApp = create<AppState>((set, get) => ({
       set({ detectedClis: map });
     } catch {
       // Keep prior results; an empty map just means "show all".
+    }
+  },
+
+  refreshGithubStatus: async () => {
+    try {
+      const status = await ipc.githubStatus();
+      set({ githubStatus: status });
+    } catch {
+      // Keep prior snapshot; a transient IPC error shouldn't blank the
+      // UI. The previous status (often "not available" on a real
+      // miss) is a reasonable display.
     }
   },
 

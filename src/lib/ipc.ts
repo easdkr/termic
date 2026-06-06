@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
-  ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig,
+  ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig, GitHubStatus,
 } from "./types";
 
 // ───────────────────────────── projects ─────────────────────────────
@@ -319,6 +319,15 @@ export const agentsSave    = (agents: Agent[]) => invoke<void>("agents_save", { 
 export const discoverRepos = (dir: string) => invoke<DiscoveredRepo[]>("discover_repos", { dir });
 export const detectClis    = () => invoke<CliInfo[]>("detect_clis");
 export const listMonospaceFonts = () => invoke<string[]>("list_monospace_fonts");
+/** Snapshot of the local `gh` CLI: whether the binary is on PATH and
+ *  whether `gh auth status` succeeds for github.com. Cheap (one `which`
+ *  + at most one `gh auth status`); called from `loadAll` so the UI
+ *  can gate GitHub affordances (PR create, issue paste, …) without
+ *  blocking startup. Never stores tokens — username only. */
+export const githubStatus  = () => invoke<GitHubStatus>("github_status");
+/** `GithubStatus` alias (camelCase) — same shape as the `GitHubStatus`
+ *  interface in types.ts. */
+export type GithubStatus = GitHubStatus;
 
 // ───────────────────────────── misc ─────────────────────────────
 
