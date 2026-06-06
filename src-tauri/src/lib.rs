@@ -6444,6 +6444,127 @@ async fn github_pr_create(
     .map_err(|e| e.to_string())?
 }
 
+// ───────────────────────────── gh PR merge (Task 13) ─────────────────────────────
+//
+// Task 13 of the termic-vs-conductor plan. The Checks tab (Task 8) renders
+// the PR + check-runs; this task adds the gated Merge button that shells
+// out to `gh pr merge`. The Rust side is intentionally minimal:
+//
+//   1. resolve the project's root_path (same loader as Task 8/10),
+//   2. validate the merge method against the fixed set
+//      `{ "merge", "squash", "rebase" }`,
+//   3. shell out to `gh pr merge <n> --<method> --delete-branch`.
+//
+// The `delete-branch` flag is on by default — the user's whole point of
+// merging is to land the work, and a merged branch is dead weight in the
+// remote. If the user wants to keep the remote branch (e.g. to push more
+// commits), they can re-create it from the merge commit SHA in their
+// terminal. (A future task could expose a "Keep remote branch" toggle in
+// the dialog — not in scope here.)
+//
+// We do NOT re-fetch the PR after merging. The Checks tab's effect already
+// refetches on `data.loading` flip; the dialog flips it after the merge
+// succeeds so the user sees the freshly-merged state.
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable` / `gh_unauthenticated` /
+// `rate_limited` / fallback `gh_error`), routed through
+// `classify_gh_error`. The dialog does `err.split(":", 1)[0]` to pick
+// the right toast copy. Spawn failures (gh missing) → `gh_unavailable`
+// prefix, same as the rest of the surface.
+
+/// Validate a `gh pr merge --<method>` value against the fixed set
+/// `gh` itself accepts. Pure function — no I/O — so it's unit-testable
+/// without spawning `gh`. Returns the trimmed method on success, an
+/// error string the caller prefixes into the IPC `Err` on failure.
+///
+/// We refuse anything outside `{merge, squash, rebase}` because (a) those
+/// are the three values `gh` itself documents for `--<method>`, and
+/// (b) letting arbitrary strings through would let a frontend bug
+/// shell out to `gh pr merge --rm -rf /` (no — `gh` rejects unknown
+/// methods too, but defense-in-depth at the IPC boundary is cheap and
+/// the user gets a clearer error here than "unknown flag" from gh).
+fn validate_pr_merge_method(method: &str) -> Result<&str, String> {
+    let trimmed = method.trim();
+    match trimmed {
+        "merge" | "squash" | "rebase" => Ok(trimmed),
+        _ => Err(format!(
+            "Invalid merge method: {} (expected one of: merge, squash, rebase)",
+            method
+        )),
+    }
+}
+
+/// Blocking implementation: load the project by id, resolve its
+/// `root_path`, validate the method, and shell out to `gh pr merge`.
+/// Returns the trimmed stdout (which `gh` populates with a
+/// "Merged pull request #N" or "Squash merging…" line on success,
+/// and leaves empty on `--quiet`-style success). The frontend
+/// doesn't currently render the stdout, but returning it leaves
+/// the door open for a future "Merge details" panel without
+/// re-shelling.
+fn github_pr_merge_blocking(
+    project_id: String,
+    pr_number: u64,
+    method: String,
+) -> Result<String, String> {
+    let method = validate_pr_merge_method(&method)?;
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+    // `pr_number: 0` would let `gh pr merge 0` fail with a confusing
+    // "no pull request matches the search" message. Reject 0
+    // explicitly — the dialog's gate (`pr.draft === false` etc.)
+    // already filters this UI-side, but the IPC is a public boundary.
+    if pr_number == 0 {
+        return Err("PR number must be greater than 0".into());
+    }
+    // Build argv. `pr_number` is interpolated as a positional arg; it
+    // can only be a u64, so no shell-injection surface. `--delete-branch`
+    // matches `gh`'s default of "delete the head ref after a successful
+    // merge" — see module-level comment for the rationale.
+    let out = Command::new("gh")
+        .args([
+            "pr", "merge", &pr_number.to_string(),
+            &format!("--{}", method),
+            "--delete-branch",
+        ])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh pr merge: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// IPC entry: merge a PR via `gh pr merge`. Async + `spawn_blocking`
+/// per the long-running-IPC discipline — the merge itself can take
+/// a few seconds (GitHub has to fast-forward / squash / rebase),
+/// and the user might trigger it on a slow network. Errors carry
+/// the same `"<code>: <message>"` prefix the rest of the `gh`
+/// surface uses; the dialog does `err.split(":", 1)[0]` to pick the
+/// right toast copy. Success returns the trimmed stdout (usually
+/// "Merged pull request #N").
+#[tauri::command]
+async fn github_pr_merge(
+    project_id: String,
+    pr_number: u64,
+    method: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_pr_merge_blocking(project_id, pr_number, method)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Enumerate every installed monospace font family on the system. Used by
 /// the Appearance picker so the user sees all real options, not just our
 /// curated probe list. Cached in-process via OnceLock.
@@ -6749,7 +6870,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_pr_create,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_pr_create, github_pr_merge,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -7754,5 +7875,59 @@ mod tests {
             .expect_err("non-GitHub URL must reject");
         assert!(err.contains("GitHub PR URL"),
             "non-GitHub err must mention the GitHub-PR-URL shape, got: {err}");
+    }
+
+    // ──────────────── gh pr merge method validation (Task 13) ────────────────
+
+    /// `validate_pr_merge_method` is the only input gate for the
+    /// Merge button IPC. It must (a) accept the three `gh`-documented
+    /// methods verbatim, (b) accept them with surrounding whitespace
+    /// (paste-from-clipboard, the same defensive trim pattern the
+    /// other gh surfaces use), and (c) reject anything else with an
+    /// error that names the bad input so a frontend bug surfaces
+    /// clearly. The function is the public-boundary defense against
+    /// shell-injection — even though `Command::args` doesn't go
+    /// through a shell, refusing unknown strings at the IPC layer
+    /// gives a clearer error than `gh`'s "unknown flag" response.
+    #[test]
+    fn validate_pr_merge_method_accepts_documented_set() {
+        // Positive cases — the exact three methods `gh pr merge`
+        // documents for `--<method>`.
+        for m in ["merge", "squash", "rebase"] {
+            let got = validate_pr_merge_method(m)
+                .unwrap_or_else(|e| panic!("{m:?} must be accepted, got err: {e}"));
+            assert_eq!(got, m, "validator must return the input unchanged");
+        }
+
+        // Whitespace tolerance — paste-from-clipboard often carries a
+        // trailing `\n` or spaces. The validator trims, then matches.
+        for m in ["merge", " merge ", "\tsquash\n", "  rebase  "] {
+            let got = validate_pr_merge_method(m)
+                .unwrap_or_else(|e| panic!("{m:?} (with whitespace) must be accepted, got err: {e}"));
+            assert_eq!(got, m.trim(), "validator must return the trimmed value");
+        }
+
+        // Negative cases — anything outside the fixed set. The
+        // error message must name the bad input (so a frontend bug
+        // surfaces clearly) AND list the allowed set (so a future
+        // maintainer reading the error learns the contract).
+        // Note: "merge " (with trailing space) is in the POSITIVE
+        // set above because the validator trims first — including it
+        // here would be self-contradictory. The exact-match bad
+        // cases verify case-sensitivity ("MERGE" / "Merge" reject)
+        // and the kind of input a frontend bug might pass through
+        // ("fast-forward" / "rm" / "--delete-branch").
+        for bad in ["", "fast-forward", "MERGE", "Merge", "rm", "--delete-branch"] {
+            let err = validate_pr_merge_method(bad)
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(
+                err.contains("Invalid merge method"),
+                "rejection of {bad:?} must explain itself, got: {err}",
+            );
+            assert!(
+                err.contains("merge") && err.contains("squash") && err.contains("rebase"),
+                "rejection must list the allowed set, got: {err}",
+            );
+        }
     }
 }

@@ -7,14 +7,14 @@ import { useApp, useActiveWorkspace, usePrChecks } from "@/store/app";
 import { useUI } from "@/store/ui";
 import {
   workspaceChanges, workspaceRunScriptStream, workspaceStopScript, openPath, repoConfigLoad,
-  workspaceSpotlightStop, workspaceSpotlightResync, githubPrChecksFetch,
+  workspaceSpotlightStop, workspaceSpotlightResync, githubPrChecksFetch, githubPrMerge,
 } from "@/lib/ipc";
 import { startSpotlight } from "@/lib/spotlight";
 import type { Changes, Workspace, WorkspaceMember, Project, GitHubCheckRun } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   Play, ChevronDown, ChevronUp, ChevronRight, TerminalSquare, Square, Globe, X, Plus, GitBranch, Link2, Wrench,
-  Copy, Check, Settings, AudioWaveform, RefreshCw, Loader2, GitPullRequest, CheckCircle2, XCircle, MinusCircle,
+  Copy, Check, Settings, AudioWaveform, RefreshCw, Loader2, GitPullRequest, GitMerge, CheckCircle2, XCircle, MinusCircle,
   Circle, ExternalLink, AlertCircle, Clock,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -1689,6 +1689,64 @@ function ChecksContent({ ws }: { ws: Workspace }) {
   const pr = data.pr;
   const isDraft = pr.draft;
   const isOpen = pr.state.toLowerCase() === "open";
+  // ── Merge-button gating (Task 13) ─────────────────────────────
+  // Enabled iff:
+  //   - pr.draft === false (drafts can't be merged)
+  //   - pr.checks_passing === true (all required checks green)
+  //   - no check is currently in flight (queued / in_progress)
+  // The Rust side validates `pr_number > 0` and the method, but the
+  // UI does the green-checks gate so the user gets an explanation
+  // rather than "gh: pull request N is not mergeable".
+  const [merging, setMerging] = useState(false);
+  const anyCheckInFlight = data.checks.some(c => c.status === "in_progress" || c.status === "queued");
+  // Disabled-reason precedence (most specific first): a draft is the
+  // most permanent reason (the user has to mark it ready), an
+  // in-flight check is more actionable than "checks failing" (the
+  // user is one wait away from a green build), and "waiting for
+  // checks" comes before "checks failing" because the latter only
+  // applies when there IS a check result to look at.
+  const mergeDisabledReason: string | null = isDraft
+    ? "PR is a draft"
+    : anyCheckInFlight
+    ? "Checks running"
+    : pr.checks_passing === null
+    ? "Waiting for checks"
+    : pr.checks_passing === false
+    ? "Checks failing"
+    : null;
+  const mergeEnabled = mergeDisabledReason === null;
+  const handleMerge = async () => {
+    if (!mergeEnabled || merging) return;
+    const ok = await useUI.getState().askConfirm({
+      title: "Merge pull request",
+      message: `Merge PR #${pr.number} into ${pr.base_ref}? The head branch will be deleted.`,
+      confirmLabel: "Merge",
+      // Not destructive — merging is a normal, recoverable action
+      // (the PR can be reverted, the branch recreated from the merge
+      // SHA). No red ring.
+    });
+    if (!ok) return;
+    setMerging(true);
+    try {
+      await githubPrMerge({ projectId: ws.project_id, prNumber: pr.number, method: "squash" });
+      useUI.getState().pushToast(`PR #${pr.number} merged`, "success");
+      // Re-fetch so the post-merge state (PR closed, checks gone,
+      // branch gone) replaces the snapshot the user just acted on.
+      // Same loading-flag-bump pattern the refresh button uses.
+      setPrChecksLoading(ws.id, true);
+    } catch (err) {
+      // Stable-error-code prefix match, same as the empty-state
+      // branch above. Unknown codes land in the generic toast.
+      const msg = String(err);
+      const code = msg.split(":", 1)[0];
+      const kind: "error" | "info" = code === "gh_unauthenticated" || code === "gh_unavailable"
+        ? "info"
+        : "error";
+      useUI.getState().pushToast(msg, kind);
+    } finally {
+      setMerging(false);
+    }
+  };
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* PR header — clickable title links to the PR on GitHub. */}
@@ -1719,6 +1777,39 @@ function ChecksContent({ ws }: { ws: Workspace }) {
         </div>
         <ExternalLink className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] opacity-0 group-hover:opacity-100" />
       </button>
+      {/* Merge action bar — gated on green checks + non-draft + no
+          in-flight checks. Tooltip carries the disabled reason so
+          the user understands WHY the button is grey. Method is
+          fixed to "squash" for the MVP — the IPC supports all three
+          (`merge` / `squash` / `rebase`), and a method picker can
+          land in a follow-up task. */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border-soft)] px-3 py-2">
+        <div className="text-[11.5px] text-[var(--color-fg-faint)]">
+          {data.checks.length === 0
+            ? "No checks reported"
+            : mergeEnabled
+            ? "All checks passed"
+            : mergeDisabledReason}
+        </div>
+        <Tip
+          content={mergeEnabled ? `Squash and merge PR #${pr.number}` : mergeDisabledReason ?? ""}
+          side="top"
+        >
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={handleMerge}
+            disabled={!mergeEnabled || merging}
+            data-testid="checks-merge"
+            className="ml-auto h-6 gap-1 px-2 text-[12px]"
+          >
+            {merging
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <GitMerge className="h-3 w-3" />}
+            {merging ? "Merging…" : "Merge"}
+          </Button>
+        </Tip>
+      </div>
       {/* Checks list */}
       <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
         {data.checks.length === 0 ? (

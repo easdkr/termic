@@ -407,6 +407,31 @@ export const githubPrCreate = (args: {
     draft: args.draft,
   });
 
+/** Merge a pull request via `gh pr merge <n> --<method> --delete-branch`.
+ *  `method` is one of `"merge" | "squash" | "rebase"` (validated on the
+ *  Rust side; any other value returns an error from the IPC). The Rust
+ *  side always passes `--delete-branch` — there's no IPC arg to opt out;
+ *  the user's whole point of merging is to land the work, and a merged
+ *  branch is dead weight in the remote. Success returns the trimmed
+ *  `gh` stdout (usually "Merged pull request #N") — the Checks tab
+ *  ignores it for now, but the field is there for a future "Merge
+ *  details" panel without re-shelling. Errors carry the same
+ *  `<code>: <message>` prefixes the rest of the `gh` surface uses; the
+ *  Merge button does `err.split(":", 1)[0]` to pick the right toast
+ *  copy. Async + `spawn_blocking` on the Rust side — the merge itself
+ *  can take a few seconds (GitHub has to fast-forward / squash / rebase),
+ *  and the user might trigger it on a slow network. */
+export const githubPrMerge = (args: {
+  projectId: string;
+  prNumber: number;
+  method: "merge" | "squash" | "rebase";
+}) =>
+  invoke<string>("github_pr_merge", {
+    projectId: args.projectId,
+    prNumber: args.prNumber,
+    method: args.method,
+  });
+
 // ───────────────────────────── misc ─────────────────────────────
 
 import {
