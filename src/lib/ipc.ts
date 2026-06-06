@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig, GitHubStatus,
-  PullRequestWithChecks, IssueSeed,
+  PullRequestWithChecks, IssueSeed, GitHubPullRequest,
 } from "./types";
 
 // ───────────────────────────── projects ─────────────────────────────
@@ -377,6 +377,35 @@ export const githubPrChecksFetch = (projectId: string, branch: string) =>
  *  uncached repo can take a few hundred ms. */
 export const githubIssueFetch = (url: string) =>
   invoke<IssueSeed>("github_issue_fetch", { url });
+
+/** Create a PR (draft or regular) on GitHub via `gh pr create`. The
+ *  Rust side runs the create + a follow-up `gh pr view` in series
+ *  and round-trips the freshly-created PR into a `GitHubPullRequest`
+ *  so the dialog's success path can show the URL + title + draft
+ *  chip without a second fetch. Error messages carry the same
+ *  stable code prefixes the rest of the `gh` surface uses
+ *  (`gh_unavailable:` / `gh_unauthenticated:` / `rate_limited:` /
+ *  `gh_error:`); the dialog does `err.split(":", 1)[0]` to pick
+ *  the right inline message. The backend trims the title and
+ *  rejects it when empty, but the dialog also enforces that
+ *  client-side so the user gets instant feedback. `body` is
+ *  always passed (empty body is allowed — `gh` tolerates it). */
+export const githubPrCreate = (args: {
+  projectId: string;
+  title: string;
+  body: string;
+  base: string;
+  head: string;
+  draft: boolean;
+}) =>
+  invoke<GitHubPullRequest>("github_pr_create", {
+    projectId: args.projectId,
+    title: args.title,
+    body: args.body,
+    base: args.base,
+    head: args.head,
+    draft: args.draft,
+  });
 
 // ───────────────────────────── misc ─────────────────────────────
 

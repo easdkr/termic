@@ -1650,7 +1650,13 @@ function ChecksContent({ ws }: { ws: Workspace }) {
   }
 
   // ── empty state — branch has no PR ─────────────────────────────
+  // The "Create PR" button is the natural "next action" after the
+  // user sees there's no PR for the branch. Hidden for non-git
+  // projects (`gh pr create` requires a branch) and for repo-root
+  // workspaces (Task 13 / 16 may add a different flow for those).
   if (!data.pr) {
+    const project = useApp.getState().projects.find(p => p.id === ws.project_id);
+    const canCreatePr = !project?.non_git && !ws.is_repo_root;
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
         <GitPullRequest className="h-10 w-10 text-[var(--color-fg-faint)] opacity-30" />
@@ -1663,6 +1669,18 @@ function ChecksContent({ ws }: { ws: Workspace }) {
         <p className="text-[11px] text-[var(--color-fg-faint)]">
           Branch: <code className="font-mono">{ws.branch}</code>
         </p>
+        {canCreatePr && (
+          <Button
+            size="sm"
+            variant="secondary"
+            data-testid="checks-create-pr"
+            onClick={() => useUI.getState().openPrCreate(ws.id)}
+            className="gap-1.5"
+          >
+            <GitPullRequest className="h-3 w-3" />
+            Create PR
+          </Button>
+        )}
       </div>
     );
   }

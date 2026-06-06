@@ -84,6 +84,12 @@ interface UIState {
    *  has a clear scope + the trigger button (`+` per project) can
    *  identify which project the user is working in. */
   issueImportProjectId: string | null;
+  /** PR-create dialog — workspace id to seed it for, null = closed.
+   *  The dialog resolves the project + branch from the workspace
+   *  (no need to thread the project through too), and `gh pr create`
+   *  runs in the project's `root_path` on the Rust side. Lives in
+   *  the UI store so opening it doesn't churn the workspace tree. */
+  prCreateForWsId: string | null;
   /** Global "blocking work in flight" message. Shows a centered loader over
    *  the whole window so the user knows the freeze is intentional. Set for
    *  unavoidably-synchronous IPC calls like `workspace_archive` that take
@@ -135,6 +141,8 @@ interface UIState {
   closeFindInFiles:  () => void;
   openIssueImport:   (projectId: string) => void;
   closeIssueImport:  () => void;
+  openPrCreate:      (wsId: string) => void;
+  closePrCreate:     () => void;
   setBusy:           (msg: string | null) => void;
   /** Open the global confirm modal. Returns a Promise that resolves
    *  to true (user confirmed) or false (cancelled / dismissed). Drop-in
@@ -200,6 +208,7 @@ export const useUI = create<UIState>(set => ({
   fileFinderWsId: null,
   findInFilesWsId: null,
   issueImportProjectId: null,
+  prCreateForWsId: null,
   busyMessage: null,
   confirm: null,
   terminalDrop: null,
@@ -235,6 +244,8 @@ export const useUI = create<UIState>(set => ({
   closeFindInFiles:  () => set({ findInFilesWsId: null }),
   openIssueImport:   (projectId) => set({ issueImportProjectId: projectId }),
   closeIssueImport:  () => set({ issueImportProjectId: null }),
+  openPrCreate:      (wsId) => set({ prCreateForWsId: wsId }),
+  closePrCreate:     () => set({ prCreateForWsId: null }),
   setBusy:           (msg) => set({ busyMessage: msg }),
   setNotifyRoute:    (route) => set({
     notifyRoute: route ? { ...route, firedAt: Date.now() } : null,

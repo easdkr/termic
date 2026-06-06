@@ -6234,6 +6234,216 @@ async fn github_issue_fetch(url: String) -> Result<IssueSeed, String> {
         .map_err(|e| e.to_string())?
 }
 
+// ───────────────────────────── gh PR create (Task 10) ─────────────────────────────
+//
+// Task 10 of the termic-vs-conductor plan. The PrCreateDialog collects
+// title / body / base / head / draft, the Rust side shells out to
+// `gh pr create` in the project's `root_path`, parses the URL the
+// subprocess prints to stdout, and then runs a follow-up `gh pr view`
+// against the same URL to round-trip the freshly-created PR into our
+// `GitHubPullRequest` wire struct. The two-call shape mirrors what a
+// user typing in a terminal would do — `gh pr create` is fire-and-
+// forget, the URL is the artifact — and keeps the dialog's success
+// path (return the full PR object for the Checks tab to display)
+// separate from the create call's quirks (stdout is just a URL).
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable` / `gh_unauthenticated` /
+// `rate_limited` / fallback `gh_error`), routed through
+// `classify_gh_error` so the UI matches on the same prefixes it
+// already does for the Checks tab.
+
+/// Extract the PR URL from `gh pr create` stdout. The CLI prints
+/// exactly the URL (no JSON, no key= prefix), terminated by `\n`.
+/// Older `gh` versions sometimes pad with a `\r` on Windows; the
+/// `trim()` covers that. Reject anything that doesn't look like a
+/// GitHub PR URL — better to error early than feed a junk string to
+/// `gh pr view` and get a confusing "not a pull request" back.
+///
+/// Pure function — no I/O — so it's unit-testable without spawning
+/// `gh`. Returns the trimmed URL on success, an error string the
+/// caller can prefix into the IPC `Err` on failure.
+fn extract_pr_url_from_gh_output(stdout: &str) -> Result<String, String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Err("gh pr create returned no URL (empty stdout)".into());
+    }
+    // Multi-line stdout is unusual but possible (gh could in theory
+    // add a stderr-redirected warning line, or the user could be on
+    // a version that prints a banner). The URL is always the LAST
+    // whitespace-separated token on the last non-empty line.
+    let candidate = trimmed
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .unwrap_or("")
+        .trim();
+    // Cheap shape check — reject anything that doesn't look like a
+    // GitHub PR URL. We don't full-parse (no owner/repo/number
+    // extraction) because the next call is `gh pr view <url>` which
+    // has its own strict URL parsing.
+    let lower = candidate.to_lowercase();
+    if !(lower.starts_with("https://github.com/") || lower.starts_with("http://github.com/"))
+        || !lower.contains("/pull/")
+    {
+        return Err(format!(
+            "gh pr create returned no URL (stdout did not contain a GitHub PR URL): {}",
+            trimmed
+        ));
+    }
+    Ok(candidate.to_string())
+}
+
+/// Blocking implementation: load the project by id, resolve its
+/// `root_path`, and run `gh pr create` then `gh pr view` in series.
+/// The view step round-trips the freshly-created PR into our wire
+/// struct so the dialog's success path matches the Checks tab's
+/// shape (no need to handle "we just got a URL" as a separate state).
+fn github_pr_create_blocking(
+    project_id: String,
+    title: String,
+    body: String,
+    base: String,
+    head: String,
+    draft: bool,
+) -> Result<GitHubPullRequest, String> {
+    // Trim title before validation — paste-from-clipboard often
+    // carries a trailing newline, and `gh pr create` would create
+    // the PR with a literal `\n` in the title if we passed it
+    // through unchecked. The frontend also trims (Task 10 spec:
+    // "Empty title blocked" must fire BEFORE the IPC), so this is
+    // belt-and-suspenders.
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("Title is required".into());
+    }
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+    // `--base` and `--head` must be non-empty. `gh` itself will
+    // reject them too, but the error it emits is opaque; checking
+    // here lets us surface a clear user-facing message.
+    let base = base.trim();
+    let head = head.trim();
+    if base.is_empty() {
+        return Err("Base branch is required".into());
+    }
+    if head.is_empty() {
+        return Err("Head branch is required".into());
+    }
+    // Build the argv. `--draft` is only added when draft=true so a
+    // non-draft PR doesn't get a flag the CLI might one day treat as
+    // inverted. Body is always passed (possibly empty) — `gh`
+    // tolerates an empty body, which the dialog explicitly allows
+    // ("Empty body allowed" per Task 10 spec).
+    let mut args: Vec<&str> = vec![
+        "pr", "create",
+        "--base", base,
+        "--head", head,
+        "--title", &title,
+        "--body", &body,
+    ];
+    if draft { args.push("--draft"); }
+    let out = Command::new("gh")
+        .args(&args)
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh pr create: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    // Pull the PR URL from stdout, then run a follow-up `gh pr view`
+    // against it so the dialog's success payload matches the
+    // `GitHubPullRequest` shape the Checks tab already renders.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let url = extract_pr_url_from_gh_output(&stdout)?;
+    gh_pr_view_by_url_blocking(&cwd, &url)
+}
+
+/// `gh pr view <url-or-number> --json …` — like `gh_pr_view_blocking`
+/// (Task 8) but takes a full URL instead of a branch name. Same DTO
+/// → wire-struct translation, same error contract. The URL form is
+/// what `gh pr create` returns on stdout, so post-create this is
+/// the natural follow-up call. We don't share code with the branch
+/// variant because the JSON is identical but the argv shape differs
+/// and the "no pull requests found" detection doesn't apply (we
+/// just got the URL from the create call — it has to exist).
+fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHubPullRequest, String> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "view", url,
+            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft",
+        ])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh pr view: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    #[derive(Deserialize)]
+    struct GhPrDto {
+        number: u64,
+        title: String,
+        body: Option<String>,
+        state: String,
+        head_ref_name: String,
+        base_ref_name: String,
+        url: String,
+        is_draft: bool,
+    }
+    let dto: GhPrDto = serde_json::from_str(&stdout)
+        .map_err(|e| format!("gh_error: parse gh pr view: {} (raw: {})", e, stdout))?;
+    Ok(GitHubPullRequest {
+        number: dto.number,
+        title: dto.title,
+        body: dto.body,
+        state: dto.state,
+        head_ref: dto.head_ref_name,
+        base_ref: dto.base_ref_name,
+        html_url: dto.url,
+        draft: dto.is_draft,
+        // The post-create view has no associated check-runs yet
+        // (they don't exist until the workflows run) — leaving
+        // `checks_passing: None` is the "unknown" signal the
+        // Checks tab renders as a neutral state.
+        checks_passing: None,
+    })
+}
+
+/// IPC entry: create a PR (draft or regular) on GitHub via `gh`.
+/// Async + `spawn_blocking` per the long-running-IPC discipline —
+/// two `gh` subprocesses (the create + the follow-up view) each
+/// take a few hundred ms on a cold PATH. Errors carry the same
+/// `"<code>: <message>"` prefix the rest of the `gh` surface uses
+/// — the dialog does `err.split(":", 1)[0]` to pick the right
+/// inline error message. Success returns a `GitHubPullRequest`
+/// matching the shape the Checks tab already renders, so the
+/// dialog can show the URL + title + draft chip without a second
+/// fetch.
+#[tauri::command]
+async fn github_pr_create(
+    project_id: String,
+    title: String,
+    body: String,
+    base: String,
+    head: String,
+    draft: bool,
+) -> Result<GitHubPullRequest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_pr_create_blocking(project_id, title, body, base, head, draft)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Enumerate every installed monospace font family on the system. Used by
 /// the Appearance picker so the user sees all real options, not just our
 /// curated probe list. Cached in-process via OnceLock.
@@ -6539,7 +6749,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_pr_create,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -7462,5 +7672,87 @@ mod tests {
         }"#;
         let seed: IssueSeed = serde_json::from_str(json_no_body).unwrap();
         assert!(seed.body.is_none(), "null body must deserialize as None");
+    }
+
+    // ──────────────── gh PR create URL extraction (Task 10) ────────────────
+
+    /// `gh pr create` prints the PR URL to stdout, terminated by `\n`.
+    /// Windows versions sometimes pad with `\r\n`; older versions
+    /// have been seen to print a leading "Created:" prefix. The
+    /// extractor is the only thing standing between the raw stdout
+    /// and a `gh pr view <url>` follow-up call, so it has to (a) be
+    /// tolerant of trailing whitespace, (b) find the URL even when
+    /// it's NOT the first line, and (c) reject anything that doesn't
+    /// look like a GitHub PR URL so the follow-up gets a clean error
+    /// instead of "not a pull request". This is the QA scenario the
+    /// plan spec calls out ("URL extraction from `gh pr create`
+    /// stdout").
+    #[test]
+    fn extract_pr_url_from_gh_output_handles_real_world_shapes() {
+        // ─── positive cases ───
+        // The happy path: bare URL, no leading whitespace, single LF.
+        let got = extract_pr_url_from_gh_output("https://github.com/acme/app/pull/42\n")
+            .expect("plain URL on one line must parse");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // Trailing CRLF (Windows). `trim()` strips both.
+        let got = extract_pr_url_from_gh_output("https://github.com/acme/app/pull/42\r\n")
+            .expect("CRLF-terminated URL must parse");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // No trailing newline at all (e.g. captured mid-stream by a
+        // pipe that didn't flush the LF).
+        let got = extract_pr_url_from_gh_output("https://github.com/acme/app/pull/42")
+            .expect("URL with no trailing newline must parse");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // Multi-line stdout — the URL isn't necessarily the first
+        // line. Some `gh` versions print a "Creating pull request..."
+        // banner on the first line, then the URL on the second.
+        let got = extract_pr_url_from_gh_output(
+            "Creating pull request for feature/widget into main in acme/app\n\
+             https://github.com/acme/app/pull/42\n",
+        ).expect("URL on the last non-empty line must be found");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // Plain-HTTP fallback (rare but legal — older enterprise
+        // GHE setups).
+        let got = extract_pr_url_from_gh_output("http://github.com/acme/app/pull/7\n")
+            .expect("plain http:// GitHub URL must parse");
+        assert_eq!(got, "http://github.com/acme/app/pull/7");
+
+        // ─── negative cases ───
+        // Empty stdout — `gh` ran but printed nothing. This is the
+        // shape that should produce a clear "no URL" error so the
+        // UI can surface a useful toast.
+        let err = extract_pr_url_from_gh_output("").expect_err("empty stdout must reject");
+        assert!(err.contains("no URL"), "empty-stdout err must mention 'no URL', got: {err}");
+
+        // Whitespace-only stdout.
+        let err = extract_pr_url_from_gh_output("   \n\n").expect_err("whitespace stdout must reject");
+        assert!(err.contains("no URL"), "whitespace err must mention 'no URL', got: {err}");
+
+        // Stdout is a real gh message but no PR URL inside it. (e.g.
+        // gh asked for a confirmation interactively and exited with
+        // a help message.)
+        let err = extract_pr_url_from_gh_output("Welcome to GitHub CLI!\n")
+            .expect_err("banner-only stdout must reject");
+        assert!(err.contains("no URL"), "no-URL err must mention 'no URL', got: {err}");
+
+        // Stdout is a GitHub URL but NOT a /pull/ URL — could be a
+        // repo or an issue page. We must reject it explicitly so a
+        // future `gh pr view <wrong-url>` doesn't surface as a
+        // confusing "not a pull request" instead of a clean error
+        // at the dialog layer.
+        let err = extract_pr_url_from_gh_output("https://github.com/acme/app/issues/42\n")
+            .expect_err("issue URL must reject (not a PR URL)");
+        assert!(err.contains("no URL") || err.contains("GitHub PR URL"),
+            "issue-URL err must explain the rejection, got: {err}");
+
+        // Different host entirely.
+        let err = extract_pr_url_from_gh_output("https://gitlab.com/acme/app/-/merge_requests/1\n")
+            .expect_err("non-GitHub URL must reject");
+        assert!(err.contains("GitHub PR URL"),
+            "non-GitHub err must mention the GitHub-PR-URL shape, got: {err}");
     }
 }
