@@ -2,7 +2,7 @@
 // updates (immutable replacements, not in-place mutations).
 
 import { create } from "zustand";
-import type { Project, Workspace, Tab, TerminalTab, GitHubStatus, DiffInlineComment } from "@/lib/types";
+import type { Project, Workspace, Tab, TerminalTab, GitHubStatus, DiffInlineComment, GitHubPullRequest, GitHubCheckRun } from "@/lib/types";
 import * as ipc from "@/lib/ipc";
 import { focusTerminalTab } from "@/lib/tabFocus";
 import { agentDisplayName } from "@/lib/agents";
@@ -99,6 +99,33 @@ interface AppState {
   updateDiffComment: (id: string, body: string) => boolean;
   /** Remove a comment by id. No-op if not found. */
   deleteDiffComment: (id: string) => void;
+
+  /** Per-workspace Checks-tab snapshot: PR + commit check-runs, fetched
+   *  via `github_pr_checks_fetch`. Lives in the store (not the tab) so
+   *  the data survives tab switches and re-fetches don't race the UI.
+   *  `pr: null` distinguishes "no PR for this branch" (success) from
+   *  "haven't fetched yet" (`fetchedAt: null`). */
+  prChecks: Record<string, {
+    pr: GitHubPullRequest | null;
+    checks: GitHubCheckRun[];
+    loading: boolean;
+    error: string | null;
+    fetchedAt: number | null;
+  }>;
+  /** Overwrite the Checks-tab snapshot for one workspace. Pass
+   *  `error: null` on success. Sets `loading: false` and stamps
+   *  `fetchedAt`. */
+  setPrChecks: (wsId: string, payload: {
+    pr: GitHubPullRequest | null;
+    checks: GitHubCheckRun[];
+    error: string | null;
+  }) => void;
+  /** Set just the loading flag (no other field change). Use this
+   *  when kicking off a fetch so the refresh button can disable
+   *  itself without overwriting the prior data. */
+  setPrChecksLoading: (wsId: string, loading: boolean) => void;
+  /** Drop the snapshot for one workspace (e.g. on workspace archive). */
+  clearPrChecks: (wsId: string) => void;
 
   // ── actions ──
   loadAll: () => Promise<void>;
@@ -227,6 +254,7 @@ export const useApp = create<AppState>((set, get) => ({
   githubStatus: null,
   spotlightWsId: {},
   diffComments: {},
+  prChecks: {},
 
   setSpotlight: (projectId, wsId) =>
     set(s => ({
@@ -280,6 +308,50 @@ export const useApp = create<AppState>((set, get) => ({
       return { diffComments: nextMap };
     });
   },
+
+  setPrChecks: (wsId, payload) => set(s => ({
+    prChecks: {
+      ...s.prChecks,
+      [wsId]: {
+        pr: payload.pr,
+        checks: payload.checks,
+        loading: false,
+        // Non-null error short-circuits the UI to the matching empty
+        // state; null means "data is fresh" regardless of whether
+        // the PR is null (branch has no PR — success) or the checks
+        // list is empty (PR has no checks yet).
+        error: payload.error,
+        fetchedAt: Date.now(),
+      },
+    },
+  })),
+
+  setPrChecksLoading: (wsId, loading) => set(s => {
+    const cur = s.prChecks[wsId];
+    // Avoid re-renders on identical loading state — same trick the
+    // setWorkState action uses (sticky-true after done, no-op
+    // transitions) so subscribers don't churn.
+    if (cur?.loading === loading) return s;
+    return {
+      prChecks: {
+        ...s.prChecks,
+        [wsId]: {
+          pr: cur?.pr ?? null,
+          checks: cur?.checks ?? [],
+          loading,
+          error: cur?.error ?? null,
+          fetchedAt: cur?.fetchedAt ?? null,
+        },
+      },
+    };
+  }),
+
+  clearPrChecks: (wsId) => set(s => {
+    if (!(wsId in s.prChecks)) return s;
+    const next = { ...s.prChecks };
+    delete next[wsId];
+    return { prChecks: next };
+  }),
 
   loadAll: async () => {
     // Pull projects + workspaces + settings (for the agent registry).
@@ -898,6 +970,23 @@ export const useApp = create<AppState>((set, get) => ({
 // non-cached snapshots. We use a shared EMPTY constant for the "no tabs" case.
 const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
 const EMPTY_DIFF_COMMENTS: DiffInlineComment[] = Object.freeze([]) as unknown as DiffInlineComment[];
+// Frozen fallback for the Checks-tab snapshot — when a workspace has
+// never been fetched, the selector returns this constant so the
+// reference identity stays stable across re-renders. The shape
+// matches `AppState.prChecks[wsId]`.
+const EMPTY_PR_CHECKS = Object.freeze({
+  pr: null,
+  checks: [] as GitHubCheckRun[],
+  loading: false,
+  error: null,
+  fetchedAt: null,
+}) as {
+  pr: GitHubPullRequest | null;
+  checks: GitHubCheckRun[];
+  loading: boolean;
+  error: string | null;
+  fetchedAt: number | null;
+};
 
 export const useActiveWorkspace = () => useApp(s => {
   const id = s.activeWorkspaceId;
@@ -912,3 +1001,8 @@ export const useActiveTabId = (wsId: string | null | undefined) =>
  *  EMPTY_DIFF_COMMENTS so the selector stays referentially stable. */
 export const useDiffComments = (wsId: string | null | undefined) =>
   useApp(s => (wsId ? (s.diffComments[wsId] ?? EMPTY_DIFF_COMMENTS) : EMPTY_DIFF_COMMENTS));
+/** Checks-tab snapshot for a workspace. Falls back to EMPTY_PR_CHECKS
+ *  when the workspace has no entry (never fetched) so the selector
+ *  stays referentially stable. */
+export const usePrChecks = (wsId: string | null | undefined) =>
+  useApp(s => (wsId ? (s.prChecks[wsId] ?? EMPTY_PR_CHECKS) : EMPTY_PR_CHECKS));

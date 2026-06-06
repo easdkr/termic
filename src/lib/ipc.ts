@@ -7,6 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig, GitHubStatus,
+  PullRequestWithChecks,
 } from "./types";
 
 // ───────────────────────────── projects ─────────────────────────────
@@ -351,6 +352,18 @@ export const githubStatus  = () => invoke<GitHubStatus>("github_status");
 /** `GithubStatus` alias (camelCase) — same shape as the `GitHubStatus`
  *  interface in types.ts. */
 export type GithubStatus = GitHubStatus;
+
+/** Pull the PR metadata + commit check-runs for the workspace's branch.
+ *  Runs `gh pr view <branch> --json …` + `gh pr checks <branch> --json …`
+ *  in the project's `root_path` (the live checkout, not the worktree).
+ *  Returns `{ pr: null, checks: [] }` when the branch has no associated
+ *  PR — the success case, not an error. Error messages are prefixed
+ *  with stable codes the UI matches on for the right empty state:
+ *  `gh_unavailable:`, `gh_unauthenticated:`, `rate_limited:`. Async +
+ *  spawn_blocking on the Rust side — the two `gh` subprocesses can
+ *  take a few hundred ms on a cold PATH. */
+export const githubPrChecksFetch = (projectId: string, branch: string) =>
+  invoke<PullRequestWithChecks>("github_pr_checks_fetch", { projectId, branch });
 
 // ───────────────────────────── misc ─────────────────────────────
 

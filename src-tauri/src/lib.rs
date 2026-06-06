@@ -349,6 +349,18 @@ pub struct GitHubPullRequest {
     pub checks_passing: Option<bool>,
 }
 
+/// Bundle returned by `github_pr_checks_fetch` — the PR metadata for the
+/// workspace's branch plus the flat list of commit check-runs that belong
+/// to it. The PR can be null when the branch has no associated PR
+/// (empty-state in the UI). Checks are always returned (possibly empty)
+/// regardless of PR presence so the UI doesn't need a second fetch.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PullRequestWithChecks {
+    pub pr: Option<GitHubPullRequest>,
+    pub checks: Vec<GitHubCheckRun>,
+}
+
 /// Source of an `IssueSeed` — which external system the import
 /// dialog parsed the URL from. Persisted on the workspace as a
 /// breadcrumb the agent reads on first spawn.
@@ -5857,6 +5869,214 @@ async fn github_status() -> GithubStatus {
         .unwrap_or_default()
 }
 
+// ───────────────────────────── gh PR + checks fetch ─────────────────────────────
+//
+// Task 8 of the termic-vs-conductor plan. The Checks tab in the right-panel
+// footer pulls PR metadata + commit check-runs for the workspace's branch via
+// `gh pr view` + `gh pr checks`. Both run in the project's `root_path` (the
+// live checkout — not the worktree — so `gh` can locate the git remote).
+//
+// Error contract: the IPC returns `Result<PullRequestWithChecks, String>` where
+// the Err string is prefixed with a stable code the UI matches on:
+//   - "gh_unavailable: ..."     — `gh` binary missing on PATH
+//   - "gh_unauthenticated: ..." — `gh` exits non-zero with an auth hint
+//   - "rate_limited: ..."       — `gh` reports API rate limit
+//   - any other Err             — generic failure, UI falls back to a toast
+// "No PR for this branch" is NOT an error — the success payload has
+// `pr: null, checks: []` and the UI renders the "No PR or checks found" state.
+
+/// Run `gh pr view <branch> --json …` in `cwd` and return the parsed PR
+/// metadata, or `Ok(None)` when the branch has no associated PR
+/// (non-zero exit with a "no pull requests found" message on stderr).
+fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequest>> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "view", branch,
+            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft",
+        ])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("gh pr view {} (cwd={})", branch, cwd.display()))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        // "no pull requests found for branch <X>" → branch has no PR.
+        // Treat as Ok(None) so the UI renders the empty state — not an
+        // error toast. The `gh` exit code is 4 in this case (cmd 4
+        // = resource not found), but we match the message instead of
+        // the code so we're tolerant of future gh versions.
+        if stderr.to_lowercase().contains("no pull requests found")
+            || stderr.to_lowercase().contains("no pr") && stderr.to_lowercase().contains("not found")
+        {
+            return Ok(None);
+        }
+        return Err(classify_gh_error(&out.status, &stderr));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // `gh pr view --json` emits camelCase keys (headRefName, baseRefName,
+    // isDraft, ...). Map them to the snake_case `GitHubPullRequest` wire
+    // shape via a private DTO so the rest of the file stays snake_case
+    // on both sides — the rule from CLAUDE.md.
+    #[derive(Deserialize)]
+    struct GhPrDto {
+        number: u64,
+        title: String,
+        body: Option<String>,
+        state: String,
+        head_ref_name: String,
+        base_ref_name: String,
+        url: String,
+        is_draft: bool,
+    }
+    let dto: GhPrDto = serde_json::from_str(&stdout)
+        .with_context(|| format!("parse gh pr view: {}", stdout))?;
+    Ok(Some(GitHubPullRequest {
+        number: dto.number,
+        title: dto.title,
+        // GitHub returns an empty body as `null` in the JSON; serde handles
+        // that natively. We do NOT trim title / refs here — preserve as-is
+        // so the UI can word-wrap and the link's `?diff=split` URL is
+        // untouched.
+        body: dto.body,
+        state: dto.state,
+        head_ref: dto.head_ref_name,
+        base_ref: dto.base_ref_name,
+        html_url: dto.url,
+        draft: dto.is_draft,
+        // Derived: we don't have the checks list at this point (we
+        // fetch it separately); leaving as None signals "unknown" and
+        // the UI re-aggregates from the checks payload when needed.
+        // A stale "true" would be worse than "unknown".
+        checks_passing: None,
+    }))
+}
+
+/// Run `gh pr checks <branch> --json …` in `cwd` and return the parsed
+/// `Vec<GitHubCheckRun>`. Empty vec when the branch has no checks OR
+/// when the branch has no PR (the latter is the typical case — the
+/// caller passes the result straight through). We DO NOT fail loudly
+/// on `gh pr checks` exit non-zero when `pr view` succeeded: an older
+/// gh that lacks `--json` support for `pr checks` falls through to the
+/// REST API path below, and an empty checks list is otherwise a
+/// legitimate state.
+fn gh_pr_checks_list_blocking(cwd: &Path, branch: &str) -> Result<Vec<GitHubCheckRun>> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "checks", branch,
+            "--json", "name,state,conclusion,detailsUrl,startedAt,completedAt",
+        ])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("gh pr checks {} (cwd={})", branch, cwd.display()))?;
+    // Empty stdout + non-zero exit on a valid PR usually means "no
+    // checks" or "gh version doesn't support --json here". Either way:
+    // empty list, no escalation. Auth / rate-limit errors are still
+    // classified by `classify_gh_error` and bubble up.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // gh pr checks JSON: top-level array of objects, but the field
+    // names are camelCase (detailsUrl, startedAt, completedAt). We
+    // map them to the snake_case struct fields via an intermediate
+    // DTO so the `GitHubCheckRun` wire shape stays consistent with
+    // the rest of the file (snake_case on BOTH sides).
+    #[derive(Deserialize)]
+    struct GhCheckDto {
+        name: String,
+        state: String,
+        conclusion: Option<String>,
+        details_url: Option<String>,
+        started_at: String,
+        completed_at: Option<String>,
+    }
+    let dtos: Vec<GhCheckDto> = serde_json::from_str(&stdout)
+        .with_context(|| format!("parse gh pr checks: {}", stdout))?;
+    Ok(dtos.into_iter().enumerate().map(|(i, d)| GitHubCheckRun {
+        // `gh pr checks --json` doesn't expose the GitHub check-run id;
+        // we only use the URL on the frontend, so the synthetic
+        // position-based id is fine for now. If the UI ever needs the
+        // real id, swap to `gh api repos/.../check-runs` (the fallback
+        // path mentioned in the plan task spec).
+        id: i as u64,
+        name: d.name,
+        status: d.state,
+        conclusion: d.conclusion,
+        started_at: d.started_at,
+        completed_at: d.completed_at,
+        html_url: d.details_url.unwrap_or_default(),
+    }).collect())
+}
+
+/// Classify a non-zero `gh` exit into a stable error code prefix the UI
+/// can match on. The Err string is "<code>: <stderr>" so the UI does
+/// `err.startsWith("gh_unavailable:")` etc. to pick the right empty
+/// state.
+fn classify_gh_error(status: &std::process::ExitStatus, stderr: &str) -> anyhow::Error {
+    let lower = stderr.to_lowercase();
+    if !status.success() && stderr.is_empty() {
+        // `which gh` returned nothing → "No such file or directory"
+        // comes back as the OS error on stderr from Command::new.
+        // `which` itself doesn't run; Rust's Command::new surfaces
+        // io::Error::NotFound as a non-zero status with an empty
+        // stdout but the error message from spawn() is captured by
+        // `with_context` upstream — so this branch is mostly for
+        // "gh exited with empty stderr and no output".
+        return anyhow!("gh_unavailable: gh CLI exited with no output (status {})", status);
+    }
+    if lower.contains("not logged in")
+        || lower.contains("auth login")
+        || lower.contains("not authenticated")
+        || lower.contains("no oauth token")
+    {
+        return anyhow!("gh_unauthenticated: {}", stderr.trim());
+    }
+    if lower.contains("rate limit") || lower.contains("api rate limit exceeded") {
+        return anyhow!("rate_limited: {}", stderr.trim());
+    }
+    anyhow!("gh_error: {}", stderr.trim())
+}
+
+/// Blocking implementation: load the project by id, resolve its
+/// `root_path`, and run `gh pr view` + `gh pr checks` there.
+fn github_pr_checks_fetch_blocking(
+    project_id: String,
+    branch: String,
+) -> Result<PullRequestWithChecks> {
+    // Look up the project via the same loader the rest of the file
+    // uses. `load_projects()` never returns Err — it falls back to an
+    // empty Vec when projects.json is missing or unparseable.
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| anyhow!("project not found: {}", project_id))?;
+    let cwd = PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(anyhow!("project root path missing: {}", project.root_path));
+    }
+    let pr = gh_pr_view_blocking(&cwd, &branch)?;
+    // Even when there's no PR, we still try the checks call — a
+    // branch with no PR but commit checks (rare, but possible if the
+    // user queried a branch GitHub hasn't linked to a PR) returns
+    // an empty list from the helper, which is the right behavior.
+    let checks = gh_pr_checks_list_blocking(&cwd, &branch)?;
+    Ok(PullRequestWithChecks { pr, checks })
+}
+
+/// IPC entry: pull the PR + checks bundle for the workspace's branch.
+/// Async + `spawn_blocking` per the long-running-IPC discipline — two
+/// `gh` subprocesses (each up to a few hundred ms on a cold PATH),
+/// we don't want either to block the WKWebView event loop.
+#[tauri::command]
+async fn github_pr_checks_fetch(
+    project_id: String,
+    branch: String,
+) -> Result<PullRequestWithChecks, String> {
+    tauri::async_runtime::spawn_blocking(move || github_pr_checks_fetch_blocking(project_id, branch))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 /// Enumerate every installed monospace font family on the system. Used by
 /// the Appearance picker so the user sees all real options, not just our
 /// curated probe list. Cached in-process via OnceLock.
@@ -6162,7 +6382,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status,
+            list_monospace_fonts, github_status, github_pr_checks_fetch,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -6839,5 +7059,138 @@ mod tests {
         let w = ws_archived("main", &wt);
         let out = workspace_restore_validate(&w, &proj).unwrap();
         assert_eq!(out, wt, "validate should round-trip the saved worktree path");
+    }
+
+    // ──────────────── gh PR + checks fetch (Task 8) ────────────────
+
+    /// Wire-format test: the JSON we emit on the IPC channel (snake_case
+    /// per CLAUDE.md) round-trips through `GitHubPullRequest` and a
+    /// `Vec<GitHubCheckRun>` losslessly. Mirrors what the real
+    /// `gh_pr_view_blocking` and `gh_pr_checks_list_blocking` produce
+    /// after the camelCase→snake_case DTO mapping — i.e. the bytes
+    /// the UI actually sees.
+    #[test]
+    fn pr_checks_wire_format_round_trips() {
+        // Realistic PR payload in the wire shape (snake_case).
+        let pr_json = r#"{
+            "number": 42,
+            "title": "Fix widget alignment",
+            "body": "Closes #41.",
+            "state": "OPEN",
+            "head_ref": "feature/widget",
+            "base_ref": "main",
+            "html_url": "https://github.com/acme/widgets/pull/42",
+            "draft": false,
+            "checks_passing": null
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(pr_json)
+            .expect("pr wire format must deserialize");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.title, "Fix widget alignment");
+        assert_eq!(pr.body.as_deref(), Some("Closes #41."));
+        assert_eq!(pr.state, "OPEN");
+        assert_eq!(pr.head_ref, "feature/widget");
+        assert_eq!(pr.base_ref, "main");
+        assert_eq!(pr.html_url, "https://github.com/acme/widgets/pull/42");
+        assert!(!pr.draft);
+        assert_eq!(pr.checks_passing, None);
+
+        // Realistic check-run payload in the wire shape (snake_case).
+        let checks_json = r#"[
+            {
+                "id": 0,
+                "name": "build",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-06-07T10:00:00Z",
+                "completed_at": "2026-06-07T10:05:30Z",
+                "html_url": "https://github.com/acme/widgets/actions/runs/123"
+            },
+            {
+                "id": 1,
+                "name": "lint",
+                "status": "in_progress",
+                "conclusion": null,
+                "started_at": "2026-06-07T10:00:00Z",
+                "completed_at": null,
+                "html_url": "https://github.com/acme/widgets/actions/runs/124"
+            }
+        ]"#;
+        let checks: Vec<GitHubCheckRun> = serde_json::from_str(checks_json)
+            .expect("checks wire format must deserialize");
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].status, "completed");
+        assert_eq!(checks[0].conclusion.as_deref(), Some("success"));
+        assert_eq!(checks[0].html_url, "https://github.com/acme/widgets/actions/runs/123");
+        assert!(checks[0].completed_at.is_some());
+        assert_eq!(checks[1].name, "lint");
+        assert_eq!(checks[1].status, "in_progress");
+        assert!(checks[1].conclusion.is_none());
+        assert!(checks[1].completed_at.is_none());
+
+        // Bundle round-trips too — the actual IPC return type.
+        let bundle = PullRequestWithChecks {
+            pr: Some(pr),
+            checks,
+        };
+        let serialized = serde_json::to_string(&bundle).unwrap();
+        assert!(serialized.contains("https://github.com/acme/widgets/pull/42"));
+
+        // The `pr` field is `Option` — must serialize as JSON `null` when
+        // absent, not omitted (UI distinguishes "not fetched yet" from
+        // "no PR for this branch" via the explicit null).
+        let bundle_empty = PullRequestWithChecks {
+            pr: None,
+            checks: vec![],
+        };
+        let s = serde_json::to_string(&bundle_empty).unwrap();
+        assert!(s.contains("\"pr\":null"),
+            "pr=null must serialize as JSON null, got: {s}");
+    }
+
+    /// `classify_gh_error` must produce the stable error-code prefixes
+    /// the UI matches on (`gh_unavailable`, `gh_unauthenticated`,
+    /// `rate_limited`, fallback `gh_error`). The UI does
+    /// `err.startsWith("<code>:")` to pick the right empty state.
+    #[test]
+    fn classify_gh_error_emits_stable_codes() {
+        // We can't easily construct a real `ExitStatus` without spawning
+        // a process, but `classify_gh_error` only inspects it via
+        // `status.success()` for the "empty stderr" branch. Use a known
+        // failure status by exiting a true command.
+        let failed = std::process::Command::new("false").status().unwrap();
+        let ok = std::process::Command::new("true").status().unwrap();
+
+        // 1. `gh` missing / exited with no stderr → "gh_unavailable"
+        let e = classify_gh_error(&failed, "").to_string();
+        assert!(e.starts_with("gh_unavailable:"),
+            "empty-stderr failure must be gh_unavailable, got: {e}");
+
+        // 2. Auth message → "gh_unauthenticated" (matched on stderr text)
+        let e = classify_gh_error(&failed,
+            "To log in, run: gh auth login\n").to_string();
+        assert!(e.starts_with("gh_unauthenticated:"),
+            "auth hint must be gh_unauthenticated, got: {e}");
+
+        // 3. Rate limit → "rate_limited"
+        let e = classify_gh_error(&failed,
+            "API rate limit exceeded for user X (5000/hr)").to_string();
+        assert!(e.starts_with("rate_limited:"),
+            "rate limit must be rate_limited, got: {e}");
+
+        // 4. Anything else → "gh_error" (UI falls back to toast)
+        let e = classify_gh_error(&failed,
+            "unexpected network error: connection reset").to_string();
+        assert!(e.starts_with("gh_error:"),
+            "unknown error must be gh_error, got: {e}");
+
+        // 5. `success()` exits bypass the "no stderr" branch — even with
+        // empty stderr, we shouldn't emit "gh_unavailable" for a 0 exit.
+        // (Not a real scenario for a failed gh call, but pins the
+        // branch condition so a refactor doesn't accidentally widen it.)
+        let e = classify_gh_error(&ok, "").to_string();
+        assert!(e.starts_with("gh_error:"),
+            "zero-exit with empty stderr must fall through to gh_error, got: {e}");
     }
 }

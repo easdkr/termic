@@ -505,6 +505,17 @@ export interface GitHubPullRequest {
   checks_passing?: boolean;
 }
 
+/** Bundle returned by `github_pr_checks_fetch` — the PR metadata for the
+ *  workspace's branch plus the flat list of commit-check runs that belong
+ *  to it. The PR can be null when the branch has no associated PR
+ *  (empty-state in the UI: "No PR or checks found for this branch").
+ *  Checks are always returned (possibly empty) regardless of PR presence
+ *  so the UI can render "no checks" without a separate fetch. */
+export interface PullRequestWithChecks {
+  pr: GitHubPullRequest | null;
+  checks: GitHubCheckRun[];
+}
+
 /** Input shape for "seed a workspace from an issue". Filled in by
  *  the issue-import dialog; persisted on the workspace as the
  *  breadcrumb the agent reads on first spawn. */
