@@ -3305,6 +3305,187 @@ fn workspace_archive_sync(id: String, delete_branch: bool) -> Result<(), String>
     if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
 }
 
+// ───────────────────────── restore archived workspace (Task 12) ─────────────────────────
+
+/// Cheap validation for an archived-workspace restore. Returns the
+/// resolved worktree path on success; surfaces clear errors for
+/// repo-root / non-git / missing-branch cases so the UI doesn't have
+/// to interpret internal `git` output. Extracted from the main
+/// `workspace_restore_sync` so the unit tests for the error paths
+/// don't need to touch the data dir or run a full restore.
+fn workspace_restore_validate(w: &Workspace, proj: &Project) -> Result<PathBuf, String> {
+    if w.is_repo_root {
+        return Err("repo-root workspaces can't be restored this way — the repo is still on disk; re-open it via the project".into());
+    }
+    if proj.non_git {
+        return Err("non-git projects don't support worktree restore".into());
+    }
+    if w.branch.is_empty() {
+        return Err("archived workspace has no saved branch — cannot restore".into());
+    }
+    let repo = PathBuf::from(&proj.root_path);
+    if git(&["rev-parse", "--verify", &w.branch], &repo).is_err() {
+        return Err(format!(
+            "branch '{}' no longer exists in the project's repo",
+            w.branch
+        ));
+    }
+    Ok(PathBuf::from(&w.path))
+}
+
+/// Re-materialize the on-disk worktree for an archived workspace:
+/// prune stale git worktree registrations, nuke any orphan dir at the
+/// saved path, then `git worktree add` the branch back in. Also
+/// re-copies `files_to_copy` and re-materializes `external_dir_links`,
+/// mirroring `workspace_create_sync` so the restored worktree is
+/// indistinguishable from a freshly-created one.
+///
+/// Errors before the worktree re-add leave the workspace archived —
+/// per the plan rule "must NOT remove archived history until restore
+/// succeeds". The `archived = false` flip is the very last step.
+fn workspace_restore_sync(id: String) -> Result<Workspace, String> {
+    // 1. Load + freshness check.
+    let list = load_workspaces();
+    let w = list.iter().find(|w| w.id == id)
+        .ok_or("workspace not found")?
+        .clone();
+    if !w.archived {
+        return Err("workspace is not archived".into());
+    }
+    let projects = load_projects();
+    let proj = projects.iter().find(|p| p.id == w.project_id)
+        .ok_or("project not found")?
+        .clone();
+
+    // 2. Cheap validation (clear errors for repo-root / non-git / missing branch).
+    let wt_path = workspace_restore_validate(&w, &proj)?;
+    let repo = PathBuf::from(&proj.root_path);
+
+    // 3. Clean stale worktree metadata. Refs to dirs the user removed
+    //    by hand or leftovers from a previous failed restore.
+    let _ = git(&["worktree", "prune"], &repo);
+
+    // 4. If the saved path is occupied, decide what to do.
+    if wt_path.exists() {
+        let listed = git(&["worktree", "list", "--porcelain"], &repo).unwrap_or_default();
+        let path_str = wt_path.to_string_lossy();
+        let registered = listed.lines().any(|l| {
+            l.strip_prefix("worktree ").map(|p| p == path_str).unwrap_or(false)
+        });
+        if registered {
+            return Err(format!(
+                "a worktree already lives at {} — remove it first",
+                wt_path.display()
+            ));
+        }
+        // Orphan dir from a prior failed restore — nuke it.
+        fs::remove_dir_all(&wt_path).map_err(|e|
+            format!("orphan directory at {} couldn't be removed: {}", wt_path.display(), e))?;
+    }
+
+    // 5. git-crypt: two-step worktree-add (--no-checkout → symlink key
+    //    dir → reset --hard HEAD) so the smudge filter finds the key
+    //    in the new per-worktree gitdir. Mirrors workspace_create_sync.
+    let common_gitdir = git(&["rev-parse", "--git-common-dir"], &repo)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .map(|s| {
+            let p = PathBuf::from(&s);
+            if p.is_absolute() { p } else { repo.join(p) }
+        });
+    let has_git_crypt = common_gitdir
+        .as_ref()
+        .map(|p| p.join("git-crypt").exists())
+        .unwrap_or(false);
+
+    let wt_arg = wt_path.to_str().ok_or("worktree path is not valid UTF-8")?;
+    let add_args: Vec<&str> = if has_git_crypt {
+        vec!["worktree", "add", "--no-checkout", wt_arg, &w.branch]
+    } else {
+        vec!["worktree", "add", wt_arg, &w.branch]
+    };
+    git(&add_args, &repo).map_err(|e| format!("worktree add failed: {e}"))?;
+
+    if has_git_crypt {
+        let wt_gitdir_raw = git(&["rev-parse", "--git-dir"], &wt_path)
+            .map_err(|e| format!("git-crypt setup: couldn't resolve worktree gitdir: {e}"))?;
+        let wt_gitdir = {
+            let p = PathBuf::from(wt_gitdir_raw.trim());
+            if p.is_absolute() { p } else { wt_path.join(p) }
+        };
+        let key_target = common_gitdir.as_ref().unwrap().join("git-crypt");
+        let key_link = wt_gitdir.join("git-crypt");
+        if !key_link.exists() {
+            std::os::unix::fs::symlink(&key_target, &key_link)
+                .map_err(|e| format!("git-crypt setup: symlink {} → {} failed: {e}",
+                    key_link.display(), key_target.display()))?;
+        }
+        git(&["reset", "--hard", "HEAD"], &wt_path)
+            .map_err(|e| format!("git-crypt setup: post-symlink checkout failed: {e}"))?;
+    }
+
+    // 6. Re-copy `files_to_copy` (parity with workspace_create_sync).
+    for pat in &effective_files_to_copy(&proj) {
+        copy_matching(&repo, &wt_path, pat);
+    }
+
+    // 7. Re-materialize the project's external dir links. Task 7
+    //    added this helper. The result Vec is discarded — restore
+    //    either succeeds or fails; partial link results aren't useful
+    //    to surface in a toast.
+    let _ = materialize_external_dir_links(&proj, &wt_path);
+
+    // 8. Multi-repo: re-add each Worktree member. RepoRoot members
+    //    are symlinks to live checkouts — nothing to rebuild on
+    //    disk. Best-effort per-member: a missing branch or stale
+    //    registration is logged but doesn't abort (we've already
+    //    re-added the host).
+    for m in &w.composition {
+        if m.mode != MemberMode::Worktree { continue; }
+        if m.branch.is_empty() || m.path.is_empty() { continue; }
+        let Some(member_proj) = projects.iter().find(|p| p.id == m.project_id) else { continue; };
+        if member_proj.non_git { continue; }
+        let mrepo = PathBuf::from(&member_proj.root_path);
+        let mwt = PathBuf::from(&m.path);
+        let _ = git(&["worktree", "prune"], &mrepo);
+        if mwt.exists() {
+            let listed = git(&["worktree", "list", "--porcelain"], &mrepo).unwrap_or_default();
+            let mpath = mwt.to_string_lossy();
+            let registered = listed.lines().any(|l| {
+                l.strip_prefix("worktree ").map(|p| p == mpath).unwrap_or(false)
+            });
+            if registered { continue; }
+            let _ = fs::remove_dir_all(&mwt);
+        }
+        if git(&["rev-parse", "--verify", &m.branch], &mrepo).is_ok() {
+            let _ = git(&["worktree", "add", mwt.to_str().unwrap_or("."), &m.branch], &mrepo);
+        }
+    }
+
+    // 9. Persist `archived = false` LAST. Plan rule: "Do NOT remove the
+    //    archived history until restore succeeds." Everything above
+    //    can fail without leaving the workspace un-archived; this
+    //    step only runs when all the disk work has landed cleanly.
+    let mut list = load_workspaces();
+    let w = list.iter_mut().find(|w| w.id == id)
+        .ok_or("workspace vanished after restore")?;
+    w.archived = false;
+    save_workspace(w).map_err(|e| e.to_string())?;
+    Ok(w.clone())
+}
+
+#[tauri::command]
+async fn workspace_restore(id: String) -> Result<Workspace, String> {
+    // `git worktree add` + `git rev-parse` + a symlink pass + an FS
+    // copy are all synchronous FS work that can take a beat on a
+    // chunky repo, so we keep this off the IPC handler thread per
+    // the long-running-IPC discipline in CLAUDE.md. Mirrors
+    // workspace_create's shape exactly.
+    tauri::async_runtime::spawn_blocking(move || workspace_restore_sync(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn workspace_delete(id: String) -> Result<(), String> {
     // Hard delete: archive (off-thread) then wipe the json. Same async
@@ -5969,7 +6150,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder,
             external_dir_link_add, external_dir_link_remove, workspace_repair_links,
-            workspaces_list, workspace_create, workspace_create_multi, workspace_open_repo, workspace_importable_worktrees, workspace_import_worktree, workspace_archive, workspace_set_cli, workspace_set_custom_command, workspace_set_sandbox,
+            workspaces_list, workspace_create, workspace_create_multi, workspace_open_repo, workspace_importable_worktrees, workspace_import_worktree, workspace_archive, workspace_restore, workspace_set_cli, workspace_set_custom_command, workspace_set_sandbox,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, workspace_sandbox_add_allowed_host, workspace_sandbox_add_allowed_path, workspace_sandbox_remove_allowed_path, workspace_recent_denials, workspace_test_sandbox,
             repo_config_load, repo_config_save, repo_config_scaffold, repo_config_add_allowed_host, repo_config_add_allowed_path,
             workspace_delete, workspace_run_script, workspace_run_script_stream, workspace_stop_script, workspace_record_spawn, workspace_set_has_history, workspace_set_agent_session_id,
@@ -6588,5 +6769,75 @@ mod tests {
         let out = materialize_external_dir_links(&proj, wt.path());
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("exists (symlink OK)"));
+    }
+
+    // ──────────────── restore archived workspace (Task 12) ────────────────
+
+    fn proj_for(root: &Path) -> Project {
+        Project {
+            root_path: root.to_string_lossy().into_owned(),
+            ..Project::default()
+        }
+    }
+
+    fn ws_archived(branch: &str, path: &Path) -> Workspace {
+        Workspace {
+            id: "ws-1".into(),
+            archived: true,
+            branch: branch.into(),
+            path: path.to_string_lossy().into_owned(),
+            ..Workspace::default()
+        }
+    }
+
+    #[test]
+    fn restore_validate_rejects_repo_root_workspace() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        let proj = proj_for(dir.path());
+        let mut w = ws_archived("main", &dir.path().join("wt"));
+        w.is_repo_root = true;
+        let err = workspace_restore_validate(&w, &proj).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("repo-root"),
+            "error should mention repo-root, got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_validate_rejects_missing_branch() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        let proj = proj_for(dir.path());
+        let w = ws_archived("definitely-not-a-real-branch", &dir.path().join("wt"));
+        let err = workspace_restore_validate(&w, &proj).unwrap_err();
+        assert!(
+            err.contains("branch 'definitely-not-a-real-branch' no longer exists"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_validate_rejects_non_git_project() {
+        let dir = tempdir().unwrap();
+        let mut proj = proj_for(dir.path());
+        proj.non_git = true;
+        let w = ws_archived("main", &dir.path().join("wt"));
+        let err = workspace_restore_validate(&w, &proj).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("non-git"),
+            "error should mention non-git, got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_validate_returns_saved_path_for_valid_workspace() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        let proj = proj_for(dir.path());
+        let wt = dir.path().join("wt");
+        let w = ws_archived("main", &wt);
+        let out = workspace_restore_validate(&w, &proj).unwrap();
+        assert_eq!(out, wt, "validate should round-trip the saved worktree path");
     }
 }

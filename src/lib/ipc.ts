@@ -66,6 +66,13 @@ export const workspaceImportWorktree = (
     sandboxAllowedHosts: sandbox?.allowedHosts,
   });
 export const workspaceArchive  = (id: string, deleteBranch?: boolean) => invoke<void>("workspace_archive", { id, deleteBranch });
+/** Re-create the on-disk worktree for an archived workspace and flip
+ *  `archived=false`. Rejects on repo-root workspaces, non-git
+ *  projects, and when the saved branch no longer exists in the
+ *  project's repo (the workspace stays archived in that case). The
+ *  caller is expected to `useApp.loadAll()` after success so the new
+ *  row appears in the sidebar and disappears from History. */
+export const workspaceRestore  = (id: string) => invoke<Workspace>("workspace_restore", { id });
 export const workspaceDelete   = (id: string) => invoke<void>("workspace_delete", { id });
 export const workspaceSetCli   = (id: string, cli: string) => invoke<void>("workspace_set_cli", { id, cli });
 /** Update a custom-command workspace's launch command (multiline bash
