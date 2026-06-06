@@ -3,7 +3,7 @@
 // setup/run/archive scripts. The "Remove repository" action removes the
 // project from our list — does NOT delete anything from disk.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { projectUpdate, projectRemove, projectSetMembers, projectAdd, repoConfigLoad, repoConfigSave, workspaceSpotlightStop, externalDirLinkAdd, externalDirLinkRemove, workspaceRepairLinks } from "@/lib/ipc";
@@ -12,7 +12,8 @@ import type { Project, RepoConfig } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
-import { Trash2, Check, Layers, X, AudioWaveform, FolderSymlink, RefreshCw } from "lucide-react";
+import { Tip } from "@/components/ui/Tooltip";
+import { Trash2, Check, Layers, X, AudioWaveform, FolderSymlink, RefreshCw, Github, GitPullRequest, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function RepositorySection({ projectId }: { projectId: string }) {
@@ -293,6 +294,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     { id: "scripts",  label: isMulti ? "Members & scripts" : "Scripts & run" },
     { id: "sandbox",  label: "Sandbox" },
     { id: "links",    label: "Links" },
+    { id: "github",   label: "GitHub" },
     { id: "advanced", label: "More" },
   ];
 
@@ -634,6 +636,10 @@ export function RepositorySection({ projectId }: { projectId: string }) {
         />
       )}
 
+      {subTab === "github" && (
+        <GithubSection projectId={projectId} />
+      )}
+
       {subTab === "advanced" && (
         <div className="flex flex-col gap-7">
           <Field
@@ -706,7 +712,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   );
 }
 
-type SubTab = "scripts" | "sandbox" | "links" | "advanced";
+type SubTab = "scripts" | "sandbox" | "links" | "github" | "advanced";
 
 function Field({ label, hint, control }: { label: string; hint?: string; control: React.ReactNode }) {
   return (
@@ -1066,6 +1072,223 @@ function AddMemberPicker({ candidates, onAdd, onQuickAdd }: {
   );
 }
 
+/** GitHub sub-tab (Task 19). Surfaces the local `gh` CLI status +
+ *  refresh, the project's remote + base branch, and one-click
+ *  affordances to open the IssueImport / PrCreate dialogs. The
+ *  status text is `data-testid="github-status"` and matches the
+ *  QA acceptance strings ("GitHub CLI authenticated" /
+ *  "Run gh auth login"). No tokens, no OAuth — the user
+ *  authenticates with `gh` on their machine. */
+function GithubSection({ projectId }: { projectId: string }) {
+  const project = useApp(s => s.projects.find(p => p.id === projectId));
+  const githubStatus = useApp(s => s.githubStatus);
+  const refreshGithubStatus = useApp(s => s.refreshGithubStatus);
+  const workspaces = useApp(s => s.workspaces);
+  const [refreshing, setRefreshing] = useState(false);
+  // Latest non-archived workspace for this project. Used to seed
+  // the PR-create dialog (it needs a wsId); null disables the
+  // button with a tooltip explanation. `created` is required on
+  // Workspace but the parse-or-zero fallback keeps the pick defined
+  // even if a future row has a malformed timestamp.
+  const prCreateWs = useMemo(() => {
+    const list = workspaces
+      .filter(w => w.project_id === projectId && !w.archived)
+      .sort((a, b) => {
+        const ta = a.created ? Date.parse(a.created) || 0 : 0;
+        const tb = b.created ? Date.parse(b.created) || 0 : 0;
+        if (ta !== tb) return tb - ta;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+    return list[0] ?? null;
+  }, [workspaces, projectId]);
+  const openIssueImport = useUI(s => s.openIssueImport);
+  const openPrCreate    = useUI(s => s.openPrCreate);
+
+  async function doRefresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await refreshGithubStatus();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  // Status state + text. Text contents match the QA scenario
+  // acceptance criteria verbatim — "GitHub CLI authenticated"
+  // when `gh auth status` exits 0, "Run gh auth login" when not.
+  const status: "unknown" | "ok" | "unauth" | "unavailable" =
+    githubStatus === null
+      ? "unknown"
+      : !githubStatus.available
+      ? "unavailable"
+      : githubStatus.authenticated
+      ? "ok"
+      : "unauth";
+  const statusText: string =
+    status === "unknown"
+      ? "Probing GitHub CLI…"
+      : status === "unavailable"
+      ? "gh CLI not found on PATH. Install the gh CLI to use the PR / Checks features."
+      : status === "unauth"
+      ? "GitHub CLI installed. Run gh auth login to connect to GitHub."
+      : `GitHub CLI authenticated${githubStatus?.username ? ` as ${githubStatus.username}` : ""}.`;
+  const statusColor =
+    status === "ok" ? "text-[var(--color-ok)]"
+    : status === "unauth" ? "text-[var(--color-warn)]"
+    : status === "unavailable" ? "text-[var(--color-err)]"
+    : "text-[var(--color-fg-faint)]";
+
+  if (!project) return null;
+
+  // Inline editor: same `projectUpdate` IPC + loadAll() reload as
+  // the More tab's "remote" / "base_branch" fields, debounced by
+  // being on `onChange` (not on submit) so the user sees their
+  // edit land without an explicit save button. The Hint on each
+  // Field explains where else the value is read.
+  // `proj` is the narrowed `Project` (we early-return null above
+  // if `project` was missing). Hoisting it into a const locks the
+  // narrowed type for the closures so TS doesn't widen back to
+  // `Project | undefined` and complain about the spread.
+  const proj = project;
+  function patchRemote(v: string) {
+    if (!proj) return;
+    void projectUpdate({ ...proj, remote: v }).then(() => useApp.getState().loadAll());
+  }
+  function patchBaseBranch(v: string) {
+    if (!proj) return;
+    void projectUpdate({ ...proj, base_branch: v }).then(() => useApp.getState().loadAll());
+  }
+
+  return (
+    <div className="flex flex-col gap-7">
+      <div>
+        <h2 className="flex items-center gap-2 text-[16px] font-medium">
+          <Github className="h-4 w-4 text-[var(--color-accent)]" />
+          GitHub
+        </h2>
+        <p className="mt-1 text-[12.5px] text-[var(--color-fg-dim)]">
+          Integrations with GitHub run via the <code className="font-mono">gh</code> CLI on your machine.
+          Termic does not store any tokens — authenticate with <code className="font-mono">gh auth login</code> in a terminal.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-1)]/60 p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13.5px] font-medium text-[var(--color-fg)]">GitHub CLI</div>
+            <div
+              data-testid="github-status"
+              data-status={status}
+              className={cn("mt-1 text-[12.5px]", statusColor)}
+            >
+              {statusText}
+            </div>
+            {status === "unauth" && (
+              <div className="mt-1.5 text-[11.5px] text-[var(--color-fg-faint)]">
+                After authenticating, click <span className="font-medium">Refresh</span> to update the status.
+              </div>
+            )}
+          </div>
+          <Tip content="Re-probe the gh CLI for install + auth status" side="top">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={doRefresh}
+              disabled={refreshing}
+              data-testid="github-status-refresh"
+              className="shrink-0 gap-1.5"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </Button>
+          </Tip>
+        </div>
+      </div>
+
+      <Field
+        label="Remote"
+        hint="Git remote name. Used when resolving the base branch and by `gh` invocations."
+        control={
+          <Input
+            value={project.remote}
+            onChange={(e) => patchRemote(e.target.value)}
+            className="font-mono"
+            placeholder="origin"
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
+            autoComplete="off"
+          />
+        }
+      />
+      <Field
+        label="Base branch"
+        hint="Each workspace is branched off here. Defaults to `origin/<branch>` when empty."
+        control={
+          <Input
+            value={project.base_branch}
+            onChange={(e) => patchBaseBranch(e.target.value)}
+            className="font-mono"
+            placeholder="origin/master"
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
+            autoComplete="off"
+          />
+        }
+      />
+
+      {/* Quick actions: the same IssueImport / PrCreate dialogs the
+          sidebar and Checks tab already expose. These are the
+          "Issue import button" and "PR create button" the spec
+          asked us to add tooltips for — Tip wraps each, so the
+          button is also the discoverability surface for the new
+          ⇧⌘P / ⇧⌘I shortcuts. PR-create is gated on having a
+          workspace to seed from (the dialog's own `wsId` arg). */}
+      <div className="flex flex-col gap-3 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-1)]/60 p-4">
+        <div className="text-[13.5px] font-medium text-[var(--color-fg)]">Quick actions</div>
+        <div className="text-[12.5px] text-[var(--color-fg-dim)]">
+          Open the issue-import and PR-create dialogs for this project. Same dialogs the sidebar's
+          <span className="px-1 font-medium text-[var(--color-fg)]">From issue URL</span> entry and
+          the right-panel <span className="px-1 font-medium text-[var(--color-fg)]">Checks</span> tab's
+          <span className="px-1 font-medium text-[var(--color-fg)]">Create PR</span> button open.
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Tip content="Open the dialog to seed a new workspace from a GitHub or Linear issue URL (⇧⌘I)" side="top">
+            <Button
+              variant="secondary"
+              size="sm"
+              data-testid="github-open-issue-import"
+              onClick={() => openIssueImport(projectId)}
+              className="gap-1.5"
+            >
+              <Plus className="h-3.5 w-3.5" /> Import from issue URL
+            </Button>
+          </Tip>
+          <Tip
+            content={prCreateWs
+              ? "Open the PR-create dialog for the latest workspace of this project (⇧⌘P)"
+              : "Create a workspace for this project first to enable the PR dialog"}
+            side="top"
+          >
+            <Button
+              variant="secondary"
+              size="sm"
+              data-testid="github-open-pr-create"
+              onClick={() => { if (prCreateWs) openPrCreate(prCreateWs.id); }}
+              disabled={!prCreateWs}
+              className="gap-1.5"
+            >
+              <GitPullRequest className="h-3.5 w-3.5" /> Create PR
+            </Button>
+          </Tip>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ExternalDirLinksSection({ project, onChanged }: {
   project: Project;
   onChanged: () => void;
@@ -1238,9 +1461,11 @@ function ExternalDirLinksSection({ project, onChanged }: {
             {pathError && <div className="mt-1 text-[11.5px] text-[var(--color-err)]">{pathError}</div>}
           </div>
           <div className="flex items-center justify-end gap-2">
-            <Button variant="primary" size="sm" onClick={add} disabled={!canAdd}>
-              {busy ? "Adding…" : "Add"}
-            </Button>
+            <Tip content="Create the symlink. New workspaces (and Import-from-issue) will mount this directory at the link name.">
+              <Button variant="primary" size="sm" onClick={add} disabled={!canAdd}>
+                {busy ? "Adding…" : "Add"}
+              </Button>
+            </Tip>
           </div>
         </div>
       </div>

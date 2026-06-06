@@ -253,6 +253,23 @@ export function RightPanel() {
     }
   }, [showSetupTab, footTab, spotlightAvailable]);
 
+  // ⇧⌘K → switch the footer to the Checks tab. The useShortcuts
+  // handler dispatches `termic-open-checks` (the footTab state is local
+  // to this component, so it can't live in the store). We also expand
+  // the footer so the user immediately sees the tab content; gate on
+  // the dispatched wsId matching the active workspace so a stale event
+  // from a previous activation can't sneak through.
+  useEffect(() => {
+    function onOpenChecks(e: Event) {
+      const detail = (e as CustomEvent<{ wsId: string }>).detail;
+      if (!detail || detail.wsId !== ws?.id) return;
+      setFootTab("checks");
+      setFootCollapsed(false);
+    }
+    window.addEventListener("termic-open-checks", onOpenChecks);
+    return () => window.removeEventListener("termic-open-checks", onOpenChecks);
+  }, [ws?.id]);
+
   if (!ws) return null;
 
   // Shared start/stop. Setup auto-switches the footer view to the Setup
@@ -459,14 +476,17 @@ export function RightPanel() {
                       still the host branch (the wrapper), so the
                       existing single-branch check fetch is correct.
                       Future multi-branch per-member checks can refine
-                      this (Task 13/16). */}
-                  <FTab
-                    label="Checks"
-                    icon={<GitPullRequest className="h-3 w-3" />}
-                    active={footTab === "checks"}
-                    onClick={() => setFootTab("checks")}
-                    dotColor={checksDot}
-                  />
+                      this (Task 13/16). Tip surfaces the new ⇧⌘K
+                      shortcut per the Task 20 spec. */}
+                  <Tip content="PR + commit checks for this branch (⇧⌘K)" side="bottom">
+                    <FTab
+                      label="Checks"
+                      icon={<GitPullRequest className="h-3 w-3" />}
+                      active={footTab === "checks"}
+                      onClick={() => setFootTab("checks")}
+                      dotColor={checksDot}
+                    />
+                  </Tip>
                   {footTab === "checks" ? (
                     <ChecksRefreshButton ws={ws} />
                   ) : (
@@ -540,14 +560,17 @@ export function RightPanel() {
           {/* Checks tab — always present, not gated on showRunTab or
               spotlight. Each workspace has a branch with a potential
               PR; surfacing the GitHub status is useful even on
-              spotlight or run-disabled workspaces. */}
-          <FTab
-            label="Checks"
-            icon={<GitPullRequest className="h-3 w-3" />}
-            active={footTab === "checks"}
-            onClick={() => { setFootTab("checks"); setFootCollapsed(false); }}
-            dotColor={checksDot}
-          />
+              spotlight or run-disabled workspaces. Tip surfaces the
+              new ⇧⌘K shortcut per the Task 20 spec. */}
+          <Tip content="PR + commit checks for this branch (⇧⌘K)" side="bottom">
+            <FTab
+              label="Checks"
+              icon={<GitPullRequest className="h-3 w-3" />}
+              active={footTab === "checks"}
+              onClick={() => { setFootTab("checks"); setFootCollapsed(false); }}
+              dotColor={checksDot}
+            />
+          </Tip>
           {/* Right-side controls depend on tab + spotlight state */}
           {footTab === "spotlight" && isSpotlighted ? (
             // Active: Resync + Stop
@@ -1778,16 +1801,18 @@ function ChecksContent({ ws }: { ws: Workspace }) {
           Branch: <code className="font-mono">{ws.branch}</code>
         </p>
         {canCreatePr && (
-          <Button
-            size="sm"
-            variant="secondary"
-            data-testid="checks-create-pr"
-            onClick={() => useUI.getState().openPrCreate(ws.id)}
-            className="gap-1.5"
-          >
-            <GitPullRequest className="h-3 w-3" />
-            Create PR
-          </Button>
+          <Tip content="Open the PR-create dialog for this workspace (⇧⌘P)" side="top">
+            <Button
+              size="sm"
+              variant="secondary"
+              data-testid="checks-create-pr"
+              onClick={() => useUI.getState().openPrCreate(ws.id)}
+              className="gap-1.5"
+            >
+              <GitPullRequest className="h-3 w-3" />
+              Create PR
+            </Button>
+          </Tip>
         )}
       </div>
     );

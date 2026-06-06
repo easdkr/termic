@@ -14,6 +14,10 @@
 //   ⇧⌘D      → open a new bottom-split terminal in the active workspace
 //   ⌘T       → new tab · ⌘K → clear terminal · ⌘P → file finder
 //   ⇧⌘F      → find in files · ⇧⌘B → broadcast · ⌘, → settings
+//   ⇧⌘P      → create PR (active workspace) — Task 20
+//   ⇧⌘I      → import from issue URL (active workspace's project) — Task 20
+//   ⇧⌘K      → open Checks tab in the right panel — Task 20
+//   ⇧⌘H      → open History view (archived workspaces) — Task 20
 import { useEffect } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
@@ -274,6 +278,54 @@ export function useShortcuts() {
           }
           // requestCloseTab confirms first if it's a dirty edit tab.
           if (wsId && activeTabId) requestCloseTab(wsId, activeTabId);
+          return;
+        }
+
+        // ⇧⌘P → open the PR-create dialog for the active workspace.
+        // No-op when there's no active workspace (no wsId → no branch to PR
+        // from). Mirrors the existing per-workspace check on the
+        // Checks-tab "Create PR" empty-state button (RightPanel.tsx).
+        case "pr-create":
+          if (!wsId) return;
+          e.preventDefault();
+          useUI.getState().openPrCreate(wsId);
+          return;
+
+        // ⇧⌘I → open the issue-import dialog for the active workspace's
+        // project. Resolves project_id from the live workspace row so the
+        // dialog pre-seeds the same way the sidebar's "From issue URL"
+        // menu item does. No-op when there's no active workspace.
+        case "issue-import": {
+          if (!wsId) return;
+          e.preventDefault();
+          const ws = state.workspaces.find(w => w.id === wsId);
+          if (!ws) return;
+          useUI.getState().openIssueImport(ws.project_id);
+          return;
+        }
+
+        // ⇧⌘K → switch the right-panel footer to the Checks tab. The
+        // footTab state is local to RightPanel, so we dispatch a custom
+        // event the panel listens for (same pattern as
+        // `termic-new-tab-menu` for the `+` tab menu). The event carries
+        // the active workspace id for parity with the other event types;
+        // RightPanel also gates on its own `ws.id` so the wrong workspace
+        // can't sneak through.
+        case "open-checks":
+          if (!wsId) return;
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("termic-open-checks", { detail: { wsId } }));
+          return;
+
+        // ⇧⌘H → jump to the History view (archived workspaces). setView
+        // clears `activeWorkspaceId` (see app.ts), so this also closes
+        // any active workspace context — matches what the sidebar's
+        // "History" entry does. Toggling: if already on history, jump
+        // back to dashboard so the user can re-trigger to come back.
+        case "open-history": {
+          e.preventDefault();
+          const onHistory = useApp.getState().view.page === "history";
+          useApp.getState().setView(onHistory ? "dashboard" : "history");
           return;
         }
       }

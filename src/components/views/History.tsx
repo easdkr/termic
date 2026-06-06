@@ -8,6 +8,7 @@ import { useUI } from "@/store/ui";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { workspaceRestore } from "@/lib/ipc";
 import { RotateCcw } from "lucide-react";
+import { Tip } from "@/components/ui/Tooltip";
 import { cn } from "@/lib/utils";
 
 /** `data-testid` may only contain [a-zA-Z0-9_-] — sanitise the
@@ -67,15 +68,17 @@ export function HistoryView() {
                   <span className="font-medium text-[13px]">{w.name}</span>
                   <span className="text-[13.5px] text-[var(--color-fg-faint)]">in {p?.name}</span>
                   <span className="ml-auto text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">archived</span>
-                  <button
-                    type="button"
-                    data-testid={restoreTestId(w.name)}
-                    onClick={() => onRestore(w.id, w.name)}
-                    className="ml-2 inline-flex items-center gap-1 rounded px-2 py-1 text-[12px] font-medium bg-[var(--color-bg-3)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    <span>Restore</span>
-                  </button>
+                  <Tip content="Re-create the worktree at its saved path and switch into it">
+                    <button
+                      type="button"
+                      data-testid={restoreTestId(w.name)}
+                      onClick={() => onRestore(w.id, w.name)}
+                      className="ml-2 inline-flex items-center gap-1 rounded px-2 py-1 text-[12px] font-medium bg-[var(--color-bg-3)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      <span>Restore</span>
+                    </button>
+                  </Tip>
                 </div>
               );
             })}
