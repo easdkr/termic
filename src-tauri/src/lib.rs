@@ -344,6 +344,11 @@ pub struct GitHubPullRequest {
     pub base_ref: String,
     pub html_url: String,
     pub draft: bool,
+    /// SHA of the PR's head commit. Optional because older `gh`
+    /// versions don't expose `headRefOid`; the popover disables
+    /// "Post to GitHub" when None. `head_ref` is the branch NAME,
+    /// not a commit, so we can't fall back to it.
+    pub head_sha: Option<String>,
     /// Derived: every `check_run` has a non-failing conclusion. `None`
     /// when no checks have run yet (UI shows a neutral state).
     pub checks_passing: Option<bool>,
@@ -5907,7 +5912,7 @@ fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequ
     let out = Command::new("gh")
         .args([
             "pr", "view", branch,
-            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft",
+            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft,headRefOid",
         ])
         .current_dir(cwd)
         .output()
@@ -5941,6 +5946,13 @@ fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequ
         base_ref_name: String,
         url: String,
         is_draft: bool,
+        /// `gh pr view`'s `headRefOid` — the SHA of the PR's head
+        /// commit. Optional because older `gh` versions don't expose
+        /// this field; absent → the popover disables "Post to
+        /// GitHub" rather than guess at a SHA. `headRefName` is the
+        /// branch name, NOT a commit, so we can't fall back to it.
+        #[serde(default)]
+        head_ref_oid: Option<String>,
     }
     let dto: GhPrDto = serde_json::from_str(&stdout)
         .with_context(|| format!("parse gh pr view: {}", stdout))?;
@@ -5957,6 +5969,7 @@ fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequ
         base_ref: dto.base_ref_name,
         html_url: dto.url,
         draft: dto.is_draft,
+        head_sha: dto.head_ref_oid,
         // Derived: we don't have the checks list at this point (we
         // fetch it separately); leaving as None signals "unknown" and
         // the UI re-aggregates from the checks payload when needed.
@@ -6378,7 +6391,7 @@ fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHub
     let out = Command::new("gh")
         .args([
             "pr", "view", url,
-            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft",
+            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft,headRefOid",
         ])
         .current_dir(cwd)
         .output()
@@ -6398,6 +6411,11 @@ fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHub
         base_ref_name: String,
         url: String,
         is_draft: bool,
+        /// See the same field in `gh_pr_view_blocking` for the
+        /// optionality contract — newer `gh` versions expose
+        /// `headRefOid`, older ones don't.
+        #[serde(default)]
+        head_ref_oid: Option<String>,
     }
     let dto: GhPrDto = serde_json::from_str(&stdout)
         .map_err(|e| format!("gh_error: parse gh pr view: {} (raw: {})", e, stdout))?;
@@ -6410,6 +6428,7 @@ fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHub
         base_ref: dto.base_ref_name,
         html_url: dto.url,
         draft: dto.is_draft,
+        head_sha: dto.head_ref_oid,
         // The post-create view has no associated check-runs yet
         // (they don't exist until the workflows run) — leaving
         // `checks_passing: None` is the "unknown" signal the
@@ -6560,6 +6579,234 @@ async fn github_pr_merge(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         github_pr_merge_blocking(project_id, pr_number, method)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────── gh PR inline review comment (Task 14) ─────────────────────────────
+//
+// Task 14 of the termic-vs-conductor plan. Task 11 added local diff
+// comments (`DiffInlineComment` in the app store); this task round-trips
+// them to GitHub via `gh api repos/<owner>/<repo>/pulls/<n>/comments`.
+// On success the comment is stamped with the new `remote_id` (and a
+// `posted_at` timestamp) so the popover can hide the "Post to GitHub"
+// button on retry — that's the duplicate-post guard.
+//
+// Two-step `gh` flow:
+//   1. `gh repo view --json owner,nameWithOwner` — discover the
+//      `<owner>/<repo>` for the cwd's git remote. The full URL form
+//      `gh api /repos/<owner>/<repo>/pulls/<n>/comments` needs the
+//      owner/repo up front; `gh api` doesn't substitute from the cwd
+//      remote for path-form args the way it does for `gh pr view <n>`.
+//      One extra `gh` call, but it uses `gh`'s own remote discovery
+//      (so HTTPS remotes, SSH remotes, and the `hub` config all work).
+//   2. `gh api repos/<owner>/<repo>/pulls/<n>/comments -f body=… -f
+//      commit_id=… -f path=… -F line=… -f side=…` — POST the comment.
+//      `-F` (raw field) is used for `line` so it ships as a JSON
+//      integer, not the string `-f` would force. The other fields are
+//      strings, so `-f` is the right choice.
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable` / `gh_unauthenticated` /
+// `rate_limited` / fallback `gh_error`), routed through
+// `classify_gh_error` so the UI matches on the same prefixes it
+// already does for the Checks tab and the Merge button.
+
+/// Validate the user-supplied inputs to `github_pr_post_diff_comment`.
+/// Pure function — no I/O — so it's unit-testable without spawning `gh`.
+/// The IPC boundary is shell-injection-safe via `Command::args` (no
+/// shell), but refusing bad data at the IPC layer gives the user a
+/// clearer error than the one `gh` would surface (e.g. "422 line must
+/// be an integer" vs "Invalid line: 0 (expected line > 0)").
+///
+/// `side`: only "left" or "right" (after trim). GitHub's API only
+/// accepts those two values; an empty / uppercase / "LEFT" string would
+/// 422.
+/// `line`: must be > 0. The API treats 0 as "line not specified", which
+/// would 422.
+/// `commit_id`: must be exactly 40 ASCII hex chars (a SHA1). The
+/// length check catches empty / truncated / full-SHA-256 (64 chars)
+/// inputs in one shot.
+fn validate_post_diff_comment_args<'a>(
+    side: &'a str,
+    line: u32,
+    commit_id: &'a str,
+) -> Result<(&'a str, u32, &'a str), String> {
+    let side = side.trim();
+    if side != "left" && side != "right" {
+        return Err(format!(
+            "Invalid side: {:?} (expected 'left' or 'right')",
+            side
+        ));
+    }
+    if line == 0 {
+        return Err("Line must be greater than 0".into());
+    }
+    if commit_id.len() != 40 {
+        return Err(format!(
+            "Invalid commit_id length: {} (expected 40 hex chars for a SHA1)",
+            commit_id.len()
+        ));
+    }
+    if !commit_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "Invalid commit_id: {:?} (expected 40 hex chars for a SHA1)",
+            commit_id
+        ));
+    }
+    Ok((side, line, commit_id))
+}
+
+/// Blocking implementation: load the project, validate inputs, discover
+/// the owner/repo via `gh repo view`, then POST a new PR review comment
+/// via `gh api`. Returns the new comment's GitHub id (a positive u64).
+fn github_pr_post_diff_comment_blocking(
+    project_id: String,
+    pr_number: u64,
+    commit_id: String,
+    path: String,
+    line: u32,
+    side: String,
+    body: String,
+) -> Result<u64, String> {
+    let (side, line, commit_id) = validate_post_diff_comment_args(&side, line, &commit_id)?;
+    if pr_number == 0 {
+        return Err("PR number must be greater than 0".into());
+    }
+    // Path / body non-empty is also enforced (the IPC boundary is the
+    // only public-facing gate — the popover's local validation is just
+    // for UX, not security).
+    if path.trim().is_empty() {
+        return Err("Path is required".into());
+    }
+    if body.trim().is_empty() {
+        return Err("Comment body is required".into());
+    }
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+
+    // Step 1: discover the owner/repo via `gh repo view`. The
+    // `--json owner,nameWithOwner` form returns a tiny JSON object —
+    // we parse it directly rather than going through `-q` + a jq
+    // expression (avoids a shell quoting landmine and keeps the
+    // error path obvious).
+    let repo_out = Command::new("gh")
+        .args(["repo", "view", "--json", "owner,nameWithOwner"])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh repo view: {}", e))?;
+    let repo_stderr = String::from_utf8_lossy(&repo_out.stderr).into_owned();
+    if !repo_out.status.success() {
+        return Err(classify_gh_error(&repo_out.status, &repo_stderr).to_string());
+    }
+    let repo_stdout = String::from_utf8_lossy(&repo_out.stdout);
+    let repo_json: serde_json::Value = serde_json::from_str(&repo_stdout)
+        .map_err(|e| format!("gh_error: parse gh repo view: {} (raw: {})", e, repo_stdout))?;
+    // `nameWithOwner` is already "owner/name" — use it directly instead
+    // of re-joining `owner.login` + `name` (avoids a class of bugs
+    // where the two fields disagree on case).
+    let owner_repo = repo_json
+        .get("nameWithOwner")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            format!(
+                "gh_error: gh repo view JSON missing nameWithOwner (raw: {})",
+                repo_stdout
+            )
+        })?
+        .to_string();
+    if !owner_repo.contains('/') {
+        return Err(format!(
+            "gh_error: nameWithOwner did not look like 'owner/repo': {:?}",
+            owner_repo
+        ));
+    }
+
+    // Step 2: POST the review comment. The path is
+    // `repos/<owner>/<repo>/pulls/<n>/comments` — `owner_repo` already
+    // contains the slash, so no concat math needed.
+    let url = format!("repos/{}/pulls/{}/comments", owner_repo, pr_number);
+    // `line` ships via `-F` (raw field) so it serializes as a JSON int.
+    // The other fields are strings, so `-f` is the right form. The
+    // `key=value` shape (one string per arg) is the canonical
+    // `gh api` input; passing a bare value would fail with "missing
+    // field name".
+    let line_arg = format!("line={}", line);
+    let body_arg = format!("body={}", body);
+    let commit_id_arg = format!("commit_id={}", commit_id);
+    let path_arg = format!("path={}", path);
+    let side_arg = format!("side={}", side);
+    let out = Command::new("gh")
+        .args([
+            "api", &url,
+            "-f", &body_arg,
+            "-f", &commit_id_arg,
+            "-f", &path_arg,
+            "-F", &line_arg,
+            "-f", &side_arg,
+        ])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh api: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    // Parse the `id` field from the response. GitHub returns the full
+    // comment object; we only need the id. The id is required to be
+    // a positive integer — if it's missing, 0, or a string, that's a
+    // shape change on the GitHub side and we want a loud error, not a
+    // silent u64 truncation.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("gh_error: parse gh api response: {} (raw: {})", e, stdout))?;
+    let id = parsed
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| {
+            format!(
+                "gh_error: gh api response missing positive integer id (raw: {})",
+                stdout
+            )
+        })?;
+    if id == 0 {
+        return Err(format!(
+            "gh_error: gh api response id was 0, not a positive integer (raw: {})",
+            stdout
+        ));
+    }
+    Ok(id)
+}
+
+/// IPC entry: post a local diff comment to a PR via `gh api`. Async +
+/// `spawn_blocking` per the long-running-IPC discipline — two `gh`
+/// subprocesses (the `repo view` + the `api` POST), each can take a
+/// few hundred ms on a cold PATH. Success returns the new GitHub
+/// review-comment id (a u64) which the caller stamps on the local
+/// `DiffInlineComment.remote_id` so the popover hides the "Post to
+/// GitHub" button on retry (the duplicate-post guard). Errors carry
+/// the same `"<code>: <message>"` prefix the rest of the `gh` surface
+/// uses (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+/// fallback `gh_error`); the popover maps the prefix to a toast kind.
+#[tauri::command]
+async fn github_pr_post_diff_comment(
+    project_id: String,
+    pr_number: u64,
+    commit_id: String,
+    path: String,
+    line: u32,
+    side: String,
+    body: String,
+) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_pr_post_diff_comment_blocking(project_id, pr_number, commit_id, path, line, side, body)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -6870,7 +7117,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_pr_create, github_pr_merge,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -7929,5 +8176,121 @@ mod tests {
                 "rejection must list the allowed set, got: {err}",
             );
         }
+    }
+
+    // ──────────────── gh pr post diff comment validation (Task 14) ────────────────
+
+    /// `validate_post_diff_comment_args` is the only input gate between
+    /// the frontend and the `gh api` subprocess for posting a local
+    /// diff comment. The validation must (a) accept the two `side`
+    /// values GitHub's review-comments API documents, (b) accept them
+    /// with surrounding whitespace (paste-from-clipboard), (c) accept
+    /// any line > 0, (d) accept any 40-char hex string as a commit SHA1,
+    /// and (e) reject everything else with an error that names the bad
+    /// input. The popover disables the button when `pr` is null, so
+    /// the validation here is the last defense against a frontend bug
+    /// passing `pr: null` + a stale comment.
+    #[test]
+    fn validate_post_diff_comment_args_accepts_valid_inputs() {
+        // ───── positive cases: side ─────
+        // The two values GitHub's review-comments API documents for
+        // `side`. The validator trims first, so surrounding whitespace
+        // is tolerated (paste-from-clipboard, the same defensive
+        // pattern the rest of the gh surface uses).
+        let sha_zeros = "0".repeat(40);
+        let sha_ones = "1".repeat(40);
+        for side in ["left", "right", " left ", "\tright\n"] {
+            let (got_side, got_line, got_sha) =
+                validate_post_diff_comment_args(side, 1, &sha_zeros)
+                    .unwrap_or_else(|e| panic!("{side:?} must be accepted, got err: {e}"));
+            assert_eq!(got_side, side.trim());
+            assert_eq!(got_line, 1);
+            assert_eq!(got_sha, sha_zeros);
+        }
+
+        // ───── positive cases: line ─────
+        // Any line > 0 is valid — the API treats 0 as "unspecified"
+        // and 422s, so the validator pins the lower bound.
+        for line in [1u32, 2, 100, 9999, u32::MAX] {
+            let (_, got_line, _) = validate_post_diff_comment_args("right", line, &sha_ones)
+                .unwrap_or_else(|e| panic!("line={line} must be accepted, got err: {e}"));
+            assert_eq!(got_line, line);
+        }
+
+        // ───── positive cases: commit_id ─────
+        // A 40-char hex string with mixed case is the canonical
+        // GitHub SHA1 shape. We don't pin to a specific public commit
+        // (those can be force-pushed away) — just the shape.
+        let real_sha = "0123456789abcdef0123456789ABCDEF01234567";
+        let (_, _, got_sha) = validate_post_diff_comment_args("right", 1, real_sha)
+            .unwrap_or_else(|e| panic!("valid SHA1 must be accepted, got err: {e}"));
+        assert_eq!(got_sha, real_sha);
+
+        // ───── negative cases: side ─────
+        // Anything outside the {left, right} set must reject with an
+        // error that names the bad input AND lists the allowed set.
+        // The error prefix is what the UI matches on, so pin the
+        // prefix in the assertion (not the exact message — future
+        // message tweaks shouldn't break the test).
+        for bad in ["", "LEFT", "Right", "both", "L", "R", "leftt"] {
+            let err = validate_post_diff_comment_args(bad, 1, real_sha)
+                .expect_err(&format!("side={bad:?} must be rejected"));
+            assert!(
+                err.starts_with("Invalid side:"),
+                "side rejection must start with 'Invalid side:', got: {err}",
+            );
+            assert!(
+                err.contains("'left'") && err.contains("'right'"),
+                "side rejection must list the allowed set, got: {err}",
+            );
+        }
+
+        // ───── negative cases: line ─────
+        // line == 0 must reject. The error must name the bad value so
+        // a frontend bug surfaces clearly.
+        let err = validate_post_diff_comment_args("right", 0, real_sha)
+            .expect_err("line=0 must be rejected");
+        assert!(
+            err.contains("Line must be greater than 0"),
+            "line=0 rejection must explain itself, got: {err}",
+        );
+
+        // ───── negative cases: commit_id length ─────
+        // Empty / truncated / SHA-256 (64 chars) must all reject with
+        // a length error. The shape-of-SHA matters here — `gh` would
+        // 422 with a confusing "No commit found for SHA" if we passed
+        // a 64-char SHA1 expecting 40, so catching the length at the
+        // IPC boundary saves a round trip + a bad toast.
+        for (bad, desc) in [
+            ("", "empty"),
+            ("abc", "too short"),
+            ("0".repeat(39).as_str(), "39 chars (one short of SHA1)"),
+            ("0".repeat(64).as_str(), "64 chars (SHA-256 length)"),
+        ] {
+            let err = validate_post_diff_comment_args("right", 1, bad)
+                .expect_err(&format!("commit_id {desc} must be rejected"));
+            assert!(
+                err.contains("Invalid commit_id length"),
+                "length rejection must explain itself for {desc}, got: {err}",
+            );
+            assert!(
+                err.contains("40 hex chars"),
+                "length rejection must mention '40 hex chars' for {desc}, got: {err}",
+            );
+        }
+
+        // ───── negative cases: commit_id charset ─────
+        // Right length but non-hex chars must reject. The hex check
+        // catches GH-style SHA1 prefixes ("0123456") even when the
+        // length is right (40 chars), AND catches gits like
+        // "z1234567890abcdef0123456789ABCDEF012345" that happen to
+        // have a non-hex char embedded.
+        let bad_sha = "z".repeat(40);
+        let err = validate_post_diff_comment_args("right", 1, &bad_sha)
+            .expect_err("non-hex commit_id must be rejected");
+        assert!(
+            err.contains("Invalid commit_id:") && err.contains("40 hex chars"),
+            "charset rejection must explain itself, got: {err}",
+        );
     }
 }

@@ -99,6 +99,12 @@ interface AppState {
   updateDiffComment: (id: string, body: string) => boolean;
   /** Remove a comment by id. No-op if not found. */
   deleteDiffComment: (id: string) => void;
+  /** Stamp a comment with its newly-assigned GitHub review-comment id
+   *  + ISO timestamp after `gh api` posts it. The popover uses the
+   *  truthiness of `remote_id` as the duplicate-post guard — once
+   *  set, the "Post to GitHub" button is hidden. No-op if the
+   *  comment id isn't found in any workspace. */
+  markDiffCommentPosted: (wsId: string, commentId: string, remoteId: number, postedAt: string) => void;
 
   /** Per-workspace Checks-tab snapshot: PR + commit check-runs, fetched
    *  via `github_pr_checks_fetch`. Lives in the store (not the tab) so
@@ -306,6 +312,22 @@ export const useApp = create<AppState>((set, get) => ({
       }
       if (!touched) return s;
       return { diffComments: nextMap };
+    });
+  },
+
+  markDiffCommentPosted: (wsId, commentId, remoteId, postedAt) => {
+    set(s => {
+      const list = s.diffComments[wsId];
+      if (!list) return s;
+      let touched = false;
+      const next = list.map(c => {
+        if (c.id !== commentId) return c;
+        if (c.remote_id === remoteId && c.posted_at === postedAt) return c;
+        touched = true;
+        return { ...c, remote_id: remoteId, posted_at: postedAt };
+      });
+      if (!touched) return s;
+      return { diffComments: { ...s.diffComments, [wsId]: next } };
     });
   },
 
@@ -993,6 +1015,16 @@ export const useActiveWorkspace = () => useApp(s => {
   if (!id) return null;
   return s.workspaces.find(w => w.id === id) ?? null;
 });
+/** Look up a workspace by id (NOT necessarily the active one). The
+ *  DiffCommentPopover uses this to resolve `wsId` → `project_id` for
+ *  the `github_pr_post_diff_comment` IPC (the Rust side needs the
+ *  project to find the repo's root_path). Returns the same reference
+ *  Zustand already holds for the row, so the selector stays
+ *  referentially stable as long as the workspace row doesn't change.
+ *  Frozen `null` fallback so the popover's re-renders don't churn on
+ *  unrelated store updates. */
+export const useWorkspace = (wsId: string | null | undefined) =>
+  useApp(s => (wsId ? s.workspaces.find(w => w.id === wsId) ?? null : null));
 export const useWorkspaceTabs = (wsId: string | null | undefined) =>
   useApp(s => (wsId ? (s.tabs[wsId] ?? EMPTY_TABS) : EMPTY_TABS));
 export const useActiveTabId = (wsId: string | null | undefined) =>

@@ -507,6 +507,13 @@ export interface GitHubPullRequest {
   base_ref: string;
   html_url: string;
   draft: boolean;
+  /** SHA of the PR's head commit. Drives the `commit_id` field of
+   *  `github_pr_post_diff_comment` (Task 14) so the inline comment
+   *  anchors to the right commit. Pulled from `gh pr view`'s
+   *  `headRefOid`; absent on older `gh` versions that don't expose
+   *  the field, in which case the popover disables the "Post to
+   *  GitHub" button. */
+  head_sha?: string | null;
   /** Derived: all `check_runs` have a non-failing conclusion. Null
    *  when no checks have run yet (UI shows a neutral state). */
   checks_passing?: boolean;

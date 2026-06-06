@@ -432,6 +432,40 @@ export const githubPrMerge = (args: {
     method: args.method,
   });
 
+/** Post a local diff comment to a PR as a GitHub review comment via
+ *  `gh api repos/<owner>/<repo>/pulls/<n>/comments`. The Rust side
+ *  shells out to `gh repo view` to discover the owner/repo and then
+ *  `gh api` to POST the comment. Returns the new GitHub review-comment
+ *  id; the caller stamps it on the local `DiffInlineComment.remote_id`
+ *  (and `posted_at`) so the popover hides the "Post to GitHub" button
+ *  on retry — that's the duplicate-post guard. Validation: `side` must
+ *  be `"left" | "right"`, `line > 0`, `commitId` is a 40-char SHA1 hex
+ *  string. The Rust validator is the authoritative gate (it gives
+ *  clearer errors than the 422s `gh api` would surface), but the
+ *  popover also pre-validates for instant UX feedback. Errors carry
+ *  the same `<code>: <message>` prefixes the rest of the `gh` surface
+ *  uses (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+ *  `gh_error`); the popover maps the prefix to a toast kind. Async +
+ *  `spawn_blocking` on the Rust side — two `gh` subprocesses. */
+export const githubPrPostDiffComment = (args: {
+  projectId: string;
+  prNumber: number;
+  commitId: string;
+  path: string;
+  line: number;
+  side: "left" | "right";
+  body: string;
+}) =>
+  invoke<number>("github_pr_post_diff_comment", {
+    projectId: args.projectId,
+    prNumber: args.prNumber,
+    commitId: args.commitId,
+    path: args.path,
+    line: args.line,
+    side: args.side,
+    body: args.body,
+  });
+
 // ───────────────────────────── misc ─────────────────────────────
 
 import {
