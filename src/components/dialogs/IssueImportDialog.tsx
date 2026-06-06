@@ -1,14 +1,16 @@
-// Issue import dialog: paste a GitHub issue URL, fetch title + body
-// via the `github_issue_fetch` IPC, pre-fill the new-workspace form
+// Issue import dialog: paste a GitHub OR Linear issue URL, fetch
+// title + body via the matching IPC (`github_issue_fetch` or
+// `linear_issue_fetch`), pre-fill the new-workspace form
 // (slugified name + branch), and create the workspace. The fetched
 // body can optionally be copied into the new workspace's setup
 // script via the "Use as setup note" checkbox — that's the only
 // thing the issue body touches in the current flow (Task 14 will
 // wire the body into the agent's first prompt as a separate change).
 //
-// Task 9 of the termic-vs-conductor plan. Lives next to
-// `NewWorkspaceDialog` so future maintainers find both workspace-
-// creation flows in the same directory.
+// Task 9 (GitHub half) + Task 15 (Linear half — MVP) of the
+// termic-vs-conductor plan. Lives next to `NewWorkspaceDialog` so
+// future maintainers find both workspace-creation flows in the
+// same directory.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useUI } from "@/store/ui";
@@ -17,7 +19,7 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
-import { githubIssueFetch, workspaceCreate } from "@/lib/ipc";
+import { githubIssueFetch, linearIssueFetch, workspaceCreate } from "@/lib/ipc";
 import { slugify, cn } from "@/lib/utils";
 import { Loader2, GitBranch, AlertTriangle, ExternalLink, Check } from "lucide-react";
 import type { IssueSeed } from "@/lib/types";
@@ -27,6 +29,56 @@ type FetchState =
   | { kind: "loading" }
   | { kind: "ok"; seed: IssueSeed }
   | { kind: "err"; message: string };
+
+/** Discriminated result of routing a pasted URL to the right IPC.
+ *  Mirrors the Rust `ParsedIssueUrl` shape (Task 15) — the dialog
+ *  uses the regex equivalent of `parse_issue_url` to pick the IPC
+ *  client-side so the user gets the right error inline without an
+ *  extra round-trip. The GitHub branch is intentionally permissive
+ *  (any github.com URL → `githubIssueFetch`); the IPC gives precise
+ *  per-failure errors for invalid shapes. The Linear branch is
+ *  strict because the IPC needs the bare id (e.g. `ENG-1234`). */
+type DetectedIssueUrl =
+  | { kind: "github" }
+  | { kind: "linear"; issueId: string }
+  | { kind: "unknown"; reason: string };
+
+/** Detect which IPC a pasted URL should route to. Mirrors the
+ *  accepted shapes in `parse_issue_url` (`src-tauri/src/lib.rs`):
+ *  - GitHub: any `https?://github.com/...` URL. The Rust parser
+ *    is the authoritative validator for `/<owner>/<repo>/issues/<n>`
+ *    shape; we let it surface the per-failure error.
+ *  - Linear: strict `https?://linear.app/<workspace>/issue/<id>`
+ *    where `<id>` is `[A-Za-z0-9-]{3,}` (matches the Rust
+ *    `id.len() < 3` floor + the alphanumeric + `-` charset).
+ *  - Unknown: anything else. The dialog renders "Unsupported issue
+ *    URL" inline without an IPC call.
+ *
+ *  Plain `http://` is accepted at the regex level (matches the
+ *  GitHub branch's permissive check) but the Linear branch is
+ *  https-only because the dialog's pre-detection should match the
+ *  strict Linear parser. */
+function detectIssueUrl(input: string): DetectedIssueUrl {
+  const trimmed = input.trim();
+  if (!trimmed) return { kind: "unknown", reason: "empty" };
+  // GitHub: route anything on github.com to `githubIssueFetch` —
+  // it returns precise per-failure errors ("expected /issues/<n>",
+  // "issue number must be > 0", etc.) that the dialog surfaces
+  // verbatim. Don't pre-validate the path shape; the Rust side is
+  // authoritative.
+  if (/^https?:\/\/(?:www\.)?github\.com\//i.test(trimmed)) {
+    return { kind: "github" };
+  }
+  // Linear: strict shape — we have to extract the issue id for the
+  // `linear_issue_fetch` IPC, so the regex needs a capture group
+  // + a length-3 floor (matches `id.len() < 3` in the Rust parser)
+  // + the alphanumeric + `-` charset (covers `ENG-1234` and UUIDs).
+  const linearMatch = /^https?:\/\/linear\.app\/[^/]+\/issue\/([A-Za-z0-9-]{3,})$/i.exec(trimmed);
+  if (linearMatch) {
+    return { kind: "linear", issueId: linearMatch[1] };
+  }
+  return { kind: "unknown", reason: "unsupported" };
+}
 
 /** Default branch prefix inferred from the issue title's leading verb.
  *  Matches the "fix/... or feat/..." convention the plan spec calls
@@ -112,10 +164,31 @@ export function IssueImportDialog() {
 
   async function doFetch() {
     if (!url.trim()) return;
+    // Client-side routing — pre-detect the URL kind so we pick
+    // the right IPC. "unknown" short-circuits to the inline error
+    // (no IPC call) per the Task 15 spec; "github" preserves the
+    // Task 9 flow exactly; "linear" extracts the id and routes to
+    // `linearIssueFetch` (MVP: always rejects with "Linear
+    // authentication not configured", which we surface verbatim).
+    const detected = detectIssueUrl(url);
+    if (detected.kind === "unknown") {
+      setFetchState({
+        kind: "err",
+        message: `Unsupported issue URL: ${url.trim()}`,
+      });
+      return;
+    }
     setFetchState({ kind: "loading" });
     setName("");
     try {
-      const seed = await githubIssueFetch(url.trim());
+      // Dispatch to the right IPC. The Linear branch passes the
+      // bare id (the Rust side validates non-empty + would
+      // re-validate the full URL shape if needed). The GitHub
+      // branch passes the trimmed URL — the Rust parser is the
+      // authoritative validator.
+      const seed = detected.kind === "linear"
+        ? await linearIssueFetch(detected.issueId)
+        : await githubIssueFetch(url.trim());
       setFetchState({ kind: "ok", seed });
       // Auto-fill name + branch from the fetched title. Cap the
       // title-derived slug at 50 chars so a long issue title
@@ -206,7 +279,7 @@ export function IssueImportDialog() {
               value={url}
               onChange={e => { setUrl(e.target.value); if (fetchState.kind === "err") setFetchState({ kind: "idle" }); }}
               onKeyDown={onUrlKeyDown}
-              placeholder="https://github.com/owner/repo/issues/123"
+              placeholder="https://github.com/owner/repo/issues/123 or https://linear.app/..."
               autoFocus
               spellCheck={false}
               autoCorrect="off"
@@ -226,14 +299,18 @@ export function IssueImportDialog() {
             </Button>
           </div>
           <div className="text-[11.5px] text-[var(--color-fg-faint)]">
-            GitHub issues only. Linear support lands in a later release.
+            GitHub issues work via the gh CLI. Linear URLs are
+            recognized but require auth (not yet configured).
           </div>
         </div>
 
-        {/* Error banner for the IPC call. Only the GitHub-side
-            failures surface here; the unsupported-URL validation is
-            all client-side. The prefix-matching lets us word the
-            right message ("install gh" vs "authenticate"). */}
+        {/* Error banner for the IPC call. Both the GitHub-side
+            failures (via `classify_gh_error`'s `gh_unavailable:` /
+            `gh_unauthenticated:` / `rate_limited:` / `gh_error:`
+            prefixes) AND the Linear MVP rejection ("Linear
+            authentication not configured") surface here. The
+            unsupported-URL validation is all client-side (no IPC
+            call for "unknown" URLs). */}
         {fetchState.kind === "err" && (
           <div className="flex items-start gap-2 rounded-md border border-[var(--color-err)]/40 bg-[var(--color-err)]/10 px-3 py-2 text-[12.5px] text-[var(--color-err)]">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

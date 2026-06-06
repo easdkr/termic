@@ -390,6 +390,39 @@ pub struct IssueSeed {
     pub body: Option<String>,
 }
 
+/// Result of `parse_issue_url` — the parsed kind plus the kind-specific
+/// payload. The dialog uses this client-side (via a regex mirror) to
+/// route to the right IPC; the Rust side keeps `parse_issue_url` as
+/// the authoritative parser so the helper is unit-testable and any
+/// future "unified" path (e.g. a `IssueFetch` that takes a URL and
+/// dispatches) has one canonical entry point. The `kind` field is
+/// snake_case on the wire to match the rest of the file's wire
+/// convention — Task 1's `IssueSource` uses the same pattern.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueUrlKind {
+    Github,
+    Linear,
+}
+
+/// Parsed result of `parse_issue_url`. Exactly one of `github` or
+/// `linear` is `Some` — the parser never returns a hybrid. The shape
+/// (struct-of-options) is intentional over an enum-with-payload so
+/// the JSON wire format is flat and easy for a regex mirror in the
+/// dialog to construct without touching enum variants. `kind` is
+/// always present and redundant with the `Some` field; future
+/// `IssueSource` values (GitLab, Jira, …) just add another option
+/// variant and another `Some` field.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedIssueUrl {
+    pub kind: IssueUrlKind,
+    /// `(owner, repo, number)` when `kind == Github`.
+    pub github: Option<(String, String, u64)>,
+    /// The Linear issue id (e.g. `ENG-1234` or a UUID) when
+    /// `kind == Linear`.
+    pub linear: Option<String>,
+}
+
 /// Which side of a diff a `DiffInlineComment` is anchored to. Maps
 /// 1:1 to the GitHub `side` parameter on the review-comments API.
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -6192,6 +6225,106 @@ fn parse_github_issue_url(url: &str) -> Result<(String, String, u64), String> {
     Ok((owner.to_string(), repo.to_string(), number))
 }
 
+/// Parse an issue URL into a `ParsedIssueUrl`. Accepts BOTH GitHub
+/// and Linear schemes (Task 15). The GitHub branch delegates to
+/// `parse_github_issue_url` for the per-segment validation; the
+/// Linear branch is hand-rolled for the same reason as Task 9's
+/// GitHub parser — `url::Url` is permissive and emits uniform
+/// "relative URL without a base" errors that are hard to make
+/// user-friendly.
+///
+/// Linear URL shape:
+///   https://linear.app/<workspace>/issue/<id>
+///   - workspace is the team's slug (any non-empty, no `/`)
+///   - id is alphanumeric + `-` (covers both the human `ENG-1234`
+///     form and the UUID form, since UUIDs only add `-` + hex)
+///   - host is case-insensitive ("Linear.app" works too)
+///   - no trailing path, no query string, no fragment
+///
+/// Rejects anything else with `"Unsupported issue URL: …"`. The
+/// dialog uses a regex mirror of these rules client-side to pick
+/// the right IPC; this function is the authoritative server-side
+/// gate and a future unified dispatcher entry point.
+///
+/// `#[allow(dead_code)]`: the only production caller is a future
+/// unified `IssueFetch` IPC that takes a URL and dispatches. Today
+/// the dialog pre-detects client-side and routes to either
+/// `github_issue_fetch` or `linear_issue_fetch` (the latter takes a
+/// bare id, not a URL), so the parser is exercised by the
+/// `parse_issue_url_handles_both_schemes` unit test only. Rust's
+/// `dead_code` analysis doesn't count `#[cfg(test)]` references,
+/// hence the allow.
+#[allow(dead_code)]
+fn parse_issue_url(url: &str) -> Result<ParsedIssueUrl, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Unsupported issue URL: empty string".into());
+    }
+    // Try GitHub first — covers the common case (most users paste
+    // GitHub URLs today) and matches what the dialog regex mirror
+    // checks first. The linear.app short-circuit lives inside
+    // `parse_github_issue_url` for the same reason as before: a
+    // pasted linear.app URL routed to `github_issue_fetch` would
+    // surface a misleading "host must be github.com" error.
+    if let Ok((owner, repo, number)) = parse_github_issue_url(trimmed) {
+        return Ok(ParsedIssueUrl {
+            kind: IssueUrlKind::Github,
+            github: Some((owner, repo, number)),
+            linear: None,
+        });
+    }
+    // Linear branch. Hand-parse for the same reasons as the GitHub
+    // branch (per-segment error messages, strict segment count).
+    let after_scheme = trimmed
+        .strip_prefix("https://")
+        .ok_or_else(|| format!("Unsupported issue URL: {} (expected https://...)", trimmed))?;
+    let (host, rest) = after_scheme
+        .split_once('/')
+        .ok_or_else(|| format!("Unsupported issue URL: {} (no path)", trimmed))?;
+    if host.to_lowercase() != "linear.app" {
+        return Err(format!("Unsupported issue URL: {} (host must be github.com or linear.app)", trimmed));
+    }
+    // Strict segment count — `/<workspace>/issue/<id>` is exactly 3
+    // segments. Rejects trailing slashes, query strings, fragments,
+    // and `/issue/ENG-1/extra` shape at once.
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.len() != 3 {
+        return Err(format!("Unsupported issue URL: {} (expected /<workspace>/issue/<id>)", trimmed));
+    }
+    let workspace = segments[0];
+    let issue_word = segments[1];
+    let id = segments[2];
+    if workspace.is_empty() {
+        return Err(format!("Unsupported issue URL: {} (missing workspace)", trimmed));
+    }
+    // Workspace is a slug — lowercase letters, digits, hyphens, and
+    // underscores only. (Linear slugs are typically lowercase but we
+    // accept the full charset for safety; the issue id check below
+    // is the authoritative shape check.)
+    if !workspace.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return Err(format!("Unsupported issue URL: {} (invalid workspace characters)", trimmed));
+    }
+    if issue_word != "issue" {
+        return Err(format!("Unsupported issue URL: {} (not an /issue/ URL)", trimmed));
+    }
+    if id.is_empty() {
+        return Err(format!("Unsupported issue URL: {} (missing issue id)", trimmed));
+    }
+    // Id charset: alphanumeric + `-`. Covers both `ENG-1234` (the
+    // user-facing team-key form) and UUIDs (which are all hex +
+    // hyphens). The length floor (3) catches the empty-after-trim
+    // case that the segment-count check might miss if the id is a
+    // bare single hyphen or two-character gibberish.
+    if id.len() < 3 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("Unsupported issue URL: {} (invalid issue id)", trimmed));
+    }
+    Ok(ParsedIssueUrl {
+        kind: IssueUrlKind::Linear,
+        github: None,
+        linear: Some(id.to_string()),
+    })
+}
+
 /// Fetch a GitHub issue's title + body via `gh api`. The `--jq`
 /// filter narrows the response to just the fields we need so we
 /// don't ship the whole 30-field issue object over IPC. Reuses
@@ -6243,6 +6376,55 @@ fn github_issue_fetch_blocking(url: String) -> Result<IssueSeed, String> {
 #[tauri::command]
 async fn github_issue_fetch(url: String) -> Result<IssueSeed, String> {
     tauri::async_runtime::spawn_blocking(move || github_issue_fetch_blocking(url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────── Linear issue fetch (Task 15) ─────────────────────────────
+//
+// Task 15 of the termic-vs-conductor plan. The dialog pre-detects
+// Linear URLs client-side and routes them to `linear_issue_fetch`
+// instead of `github_issue_fetch`. The MVP behavior is to ALWAYS
+// reject with `"Linear authentication not configured"` — Linear's
+// public-by-default issue pages require an API token for the
+// `linear.app` GraphQL endpoint, and the plan spec is explicit:
+// "Do not add Linear OAuth or token storage." A future PR can
+// swap the body of `linear_issue_fetch_blocking` for a real
+// GraphQL call (with a per-workspace, per-session token prompt
+// or a system keychain lookup) without changing the IPC shape or
+// the dialog — the dialog already calls `linearIssueFetch` and
+// surfaces the Err string verbatim.
+//
+// The id validation is intentionally permissive (non-empty after
+// trim) because the dialog has already extracted the id from a
+// `https://linear.app/...` URL via the regex mirror of
+// `parse_issue_url`. A stricter check here would just duplicate
+// the parser's work. If a future caller invokes the IPC with a
+// raw id (no URL), the non-empty check is the floor.
+
+/// Sync helper for `linear_issue_fetch`. MVP: always rejects with
+/// `"Linear authentication not configured"`. The id is trimmed and
+/// non-empty-validated to match what the dialog would pass; future
+/// implementations can extend the validation cheaply.
+fn linear_issue_fetch_blocking(issue_id: String) -> Result<IssueSeed, String> {
+    let trimmed = issue_id.trim();
+    if trimmed.is_empty() {
+        return Err("Linear issue id cannot be empty".into());
+    }
+    Err("Linear authentication not configured".to_string())
+}
+
+/// IPC entry: fetch a Linear issue's title + body. MVP behavior:
+/// always rejects with `"Linear authentication not configured"`.
+/// The plan spec is explicit about this: "If Linear cannot be read
+/// without auth, surface clear unsupported/auth-required error" and
+/// "Do not add Linear OAuth or token storage." Async +
+/// `spawn_blocking` per the long-running-IPC discipline so the
+/// future GraphQL implementation (or a keychain lookup) has the
+/// same shape as the rest of the issue-fetch surface.
+#[tauri::command]
+async fn linear_issue_fetch(issue_id: String) -> Result<IssueSeed, String> {
+    tauri::async_runtime::spawn_blocking(move || linear_issue_fetch_blocking(issue_id))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -7117,7 +7299,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, linear_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -8006,6 +8188,144 @@ mod tests {
         let r = parse_github_issue_url("https://linear.app/termic/issue/ABC-123");
         assert!(r.is_err());
         assert_eq!(r.unwrap_err(), "Linear authentication not configured");
+    }
+
+    // ──────────────── issue URL parsing — both schemes (Task 15) ────────────────
+
+    /// `parse_issue_url` is the Task 15 unified parser. It accepts
+    /// BOTH GitHub and Linear URLs and returns a `ParsedIssueUrl`
+    /// with the right kind + payload. The existing
+    /// `parse_github_issue_url_recognises_supported_schemes` test
+    /// still pins the GitHub-only path; this test covers the
+    /// Linear happy path + the cross-scheme dispatch + invalid
+    /// inputs the GitHub test would have routed to its own
+    /// rejection list. Covers the QA scenarios: a real Linear URL
+    /// (`ENG-1234` + UUID) parses, a private Linear URL (same shape
+    /// — the server can't tell public vs private at parse time)
+    /// also parses, and an unknown URL like `https://example.com/nope`
+    /// surfaces "Unsupported issue URL".
+    #[test]
+    fn parse_issue_url_handles_both_schemes() {
+        // ───── Linear positive cases (Task 15 QA) ─────
+        // The human `ENG-1234` form.
+        let r = parse_issue_url("https://linear.app/termic/issue/ENG-1234")
+            .expect("Linear ENG-1234 URL must parse");
+        assert_eq!(r.kind, IssueUrlKind::Linear);
+        assert_eq!(r.linear.as_deref(), Some("ENG-1234"));
+        assert!(r.github.is_none(),
+            "Linear URL must not populate github tuple, got: {:?}", r.github);
+
+        // The UUID form (Linear's actual issue id for non-team-key
+        // workspaces is a UUID). The id charset accepts `[A-Za-z0-9-]+`
+        // which covers hex + hyphens.
+        let r = parse_issue_url("https://linear.app/termic/issue/0a1b2c3d-4e5f-6789-abcd-ef0123456789")
+            .expect("Linear UUID URL must parse");
+        assert_eq!(r.kind, IssueUrlKind::Linear);
+        assert_eq!(r.linear.as_deref(), Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789"));
+        assert!(r.github.is_none());
+
+        // Case-insensitive host. Linear.app / LINEAR.APP / Linear.App
+        // all resolve. The dialog regex mirror uses the /i flag too.
+        let r = parse_issue_url("https://Linear.app/termic/issue/ENG-7")
+            .expect("Mixed-case Linear host must parse");
+        assert_eq!(r.kind, IssueUrlKind::Linear);
+        assert_eq!(r.linear.as_deref(), Some("ENG-7"));
+
+        // Leading/trailing whitespace stripped (matches the GitHub
+        // parser's trim behavior — the dialog might paste with a
+        // stray space).
+        let r = parse_issue_url("  https://linear.app/termic/issue/ENG-1  ")
+            .expect("Whitespace-padded Linear URL must parse");
+        assert_eq!(r.linear.as_deref(), Some("ENG-1"));
+
+        // ───── GitHub positive cases (regression — Task 9 contract) ─────
+        // The unified parser delegates to `parse_github_issue_url` for
+        // the github branch; the payload it returns must be identical
+        // to what `parse_github_issue_url` would have returned, so
+        // the GitHub IPC + the future unified dispatcher agree.
+        let r = parse_issue_url("https://github.com/acme/app/issues/123")
+            .expect("GitHub URL must parse via parse_issue_url");
+        assert_eq!(r.kind, IssueUrlKind::Github);
+        assert_eq!(r.github, Some(("acme".into(), "app".into(), 123)));
+        assert!(r.linear.is_none(),
+            "GitHub URL must not populate linear id, got: {:?}", r.linear);
+
+        // ───── invalid URLs (negative cases) ─────
+        // Anything that isn't GitHub or Linear surfaces as
+        // "Unsupported issue URL: …". Pin only the prefix so a
+        // future copy tweak doesn't break the test (same pattern as
+        // the Task 9 test).
+        let bad: &[&str] = &[
+            // empty / whitespace
+            "",
+            "   ",
+            // missing scheme
+            "github.com/acme/app/issues/1",
+            "linear.app/termic/issue/ENG-1",
+            // wrong scheme (the GitHub parser accepts http for the
+            // POST / put into the GitHub half, but the unified
+            // parser only takes https:// — cleaner UX)
+            "http://github.com/acme/app/issues/1",
+            "ftp://github.com/acme/app/issues/1",
+            // unknown host
+            "https://example.com/nope",
+            "https://gitlab.com/acme/app/issues/1",
+            // wrong GitHub path shape
+            "https://github.com/acme/app/pulls/1",   // PR URL
+            "https://github.com/acme/app/issues/1/extra",
+            // wrong Linear path shape
+            "https://linear.app/termic/",            // no /issue/<id>
+            "https://linear.app/termic/issue/",      // missing id
+            "https://linear.app/termic/issue/ENG-1/extra",
+            "https://linear.app/termic/issues/ENG-1", // plural, not "issue"
+            "https://linear.app/termic/issue/ENG-1?foo=1",
+            "https://linear.app/termic/issue/ENG-1#anchor",
+            // empty workspace
+            "https://linear.app//issue/ENG-1",
+            // invalid workspace chars
+            "https://linear.app/te$rmic/issue/ENG-1",
+            // id too short (the length-3 floor)
+            "https://linear.app/termic/issue/E",
+            "https://linear.app/termic/issue/E-",
+            // invalid id chars
+            "https://linear.app/termic/issue/ENG_123", // underscore not allowed in id
+            "https://linear.app/termic/issue/ENG 123", // space not allowed
+        ];
+        for input in bad {
+            let result = parse_issue_url(input);
+            assert!(result.is_err(), "expected {input:?} to be rejected, got Ok: {:?}", result.ok());
+            let err = result.unwrap_err();
+            assert!(err.starts_with("Unsupported issue URL: "),
+                "unexpected error shape for {input:?}: {err}");
+        }
+
+        // ───── `ParsedIssueUrl` wire format round-trips ─────
+        // The dialog regex mirror constructs a `ParsedIssueUrl`-
+        // shaped object on the TS side; the snake_case wire format
+        // must match what the Rust side expects when (in the
+        // future) the dialog sends the parsed payload to the
+        // backend. Today the dialog just dispatches based on the
+        // kind + a regex, but pinning the wire format now means a
+        // future "send the parsed URL" PR doesn't have to chase
+        // the shape.
+        let json = r#"{
+            "kind": "linear",
+            "github": null,
+            "linear": "ENG-1234"
+        }"#;
+        let parsed: ParsedIssueUrl = serde_json::from_str(json)
+            .expect("ParsedIssueUrl wire format must deserialize");
+        assert_eq!(parsed.kind, IssueUrlKind::Linear);
+        assert_eq!(parsed.linear.as_deref(), Some("ENG-1234"));
+        assert!(parsed.github.is_none());
+
+        // And the `kind` enum serializes snake_case to match
+        // `IssueSource`'s convention (Task 1).
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(s.contains("\"kind\":\"linear\""),
+            "kind must serialize as snake_case, got: {s}");
+        assert!(s.contains("\"github\":null"));
+        assert!(s.contains("\"linear\":\"ENG-1234\""));
     }
 
     /// `IssueSeed` round-trips through the wire format the UI sees

@@ -378,6 +378,23 @@ export const githubPrChecksFetch = (projectId: string, branch: string) =>
 export const githubIssueFetch = (url: string) =>
   invoke<IssueSeed>("github_issue_fetch", { url });
 
+/** Fetch a Linear issue's title + body for the issue-import dialog.
+ *  Task 15 of the termic-vs-conductor plan. The dialog pre-detects
+ *  Linear URLs client-side (regex mirror of `parse_issue_url` in
+ *  lib.rs) and calls this with the bare issue id (e.g. `ENG-1234`
+ *  or a UUID). The Rust side validates the id is non-empty and
+ *  ALWAYS returns `Err("Linear authentication not configured")` in
+ *  the MVP — Linear's public-by-default issue pages require an API
+ *  token for the GraphQL endpoint, and the plan spec is explicit
+ *  about not adding Linear OAuth or token storage. The dialog
+ *  surfaces the Err string verbatim, so the user sees the
+ *  same error whether the URL is public or private. A future PR
+ *  can swap the body for a real GraphQL call without changing the
+ *  IPC shape or the dialog. Async + `spawn_blocking` on the Rust
+ *  side — matches `githubIssueFetch`'s shape. */
+export const linearIssueFetch = (issueId: string) =>
+  invoke<IssueSeed>("linear_issue_fetch", { issueId });
+
 /** Create a PR (draft or regular) on GitHub via `gh pr create`. The
  *  Rust side runs the create + a follow-up `gh pr view` in series
  *  and round-trips the freshly-created PR into a `GitHubPullRequest`
