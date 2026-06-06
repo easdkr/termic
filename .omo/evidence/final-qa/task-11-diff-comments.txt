@@ -1,0 +1,61 @@
+TASK 11 — Diff inline comments: empty rejected + persist across remount
+==========================================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:447-470
+Subagent evidence: .omo/evidence/task-11-comment-add.txt
+
+SCENARIO 1 — empty comment rejected
+-----------------------------------
+Store layer (src/store/app.ts:272-283 addDiffComment):
+  addDiffComment: (wsId, path, side, line, body) => {
+    const trimmed = body.trim();
+    if (!trimmed) return null;
+    ...
+  }
+Returns null on empty/whitespace body — no state mutation, no toast.
+
+Popover layer (src/components/workspace/DiffCommentPopover.tsx:144-150):
+  if (mode.kind === "new") {
+    const id = addComment(wsId, path, side, line, draft);
+    if (!id) { setError("Comment cannot be empty"); return; }
+    pushToast("Comment added", "success");
+    ...
+  }
+When the store returns null, the popover sets the inline error to
+"Comment cannot be empty" (the QA scenario's expected text) and renders
+it with data-testid="diff-comment-error". The textarea border also tints
+red (cn(error, "border-[var(--color-err)]")).
+
+The edit path mirrors it (DiffCommentPopover.tsx:152-156): updateComment
+returns false on empty → same error.
+
+SCENARIO 2 — comments persist across remount
+---------------------------------------------
+Store shape: diffComments: Record<wsId, DiffInlineComment[]> at
+src/store/app.ts:93. Workspace-scoped so different workspaces are
+isolated. The action mutators (add/update/delete/markPosted) are
+immutable — every set() call returns a fresh nextMap with the targeted
+wsId entry replaced.
+
+The store is in-memory only (no disk persistence per Task 11 spec —
+Task 14 round-trips posted comments through gh api and stamps
+remote_id). Within a session:
+
+  1. User adds a comment → store holds it under diffComments[wsId].
+  2. User switches to another tab → DiffPane unmounts, MergeView
+     destroyed, gutter markers gone.
+  3. User switches back → DiffPane remounts → useDiffComments(wsId)
+     selector returns the same array (the store didn't change) → the
+     line-with-comments Sets rebuild from the same inputs → marker
+     DOM re-renders with hasComment=true for the saved line.
+
+The empty constant EMPTY_DIFF_COMMENTS (src/store/app.ts:994) is the
+frozen fallback when a wsId has no entry, so the selector stays
+referentially stable across renders. This avoids the React 19
+"getSnapshot should be cached" warning the plan calls out.
+
+VERDICT: PASS — empty body is rejected at BOTH the store and popover
+layers with identical error text, and the persistence is a straight
+consequence of the in-memory store + frozen-empty selector + non-unmount
+on tab switch (CLAUDE.md "Keep terminals mounted across switches" applies
+to the parent WorkspaceView; DiffPane itself does remount but its
+selector re-fetches the same array, so the markers come back).

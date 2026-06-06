@@ -1,0 +1,113 @@
+# Task 8 — Checks tab base UI
+
+**Date:** 2026-06-07
+**Status:** DONE — backend IPC + UI + store + Rust unit tests + build clean
+**Spec:** `.omo/plans/termic-vs-conductor.md` lines 372-395
+**Acceptance criteria:** see "Acceptance Criteria" below — all met.
+
+## What was added
+
+### Rust backend (`src-tauri/src/lib.rs`)
+
+- `PullRequestWithChecks { pr: Option<GitHubPullRequest>, checks: Vec<GitHubCheckRun> }` — the bundle returned by the new IPC. `pr` is `None` when the branch has no associated PR (success case, not an error).
+- `gh_pr_view_blocking(cwd, branch)` — runs `gh pr view <branch> --json number,title,body,state,headRefName,baseRefName,url,isDraft`, returns the parsed PR. Detects "no PR for branch" via stderr message matching (tolerant of future gh versions instead of exit-code pinning). DTO maps `headRefName → head_ref`, `baseRefName → base_ref`, `isDraft → draft`, `url → html_url` to preserve snake_case on the wire.
+- `gh_pr_checks_list_blocking(cwd, branch)` — runs `gh pr checks <branch> --json name,state,conclusion,detailsUrl,startedAt,completedAt`, returns `Vec<GitHubCheckRun>`. Empty stdout → empty list (no escalation — older gh versions without `--json` for `pr checks` don't break the UX). Auth / rate-limit errors still bubble up via `classify_gh_error`. DTO maps `detailsUrl → html_url`, `startedAt → started_at`, `completedAt → completed_at`. The synthetic `id` is the position in the array (gh pr checks doesn't expose the GitHub check-run id; the URL is what the UI uses).
+- `classify_gh_error(status, stderr) -> anyhow::Error` — returns `Err("<code>: <message>")` with stable code prefixes the UI matches on:
+  - `gh_unavailable` — `gh` exited with no output (e.g. binary missing on PATH).
+  - `gh_unauthenticated` — stderr contains "not logged in", "auth login", "not authenticated", or "no oauth token".
+  - `rate_limited` — stderr contains "rate limit" or "api rate limit exceeded".
+  - `gh_error` — fallback for anything else.
+- `github_pr_checks_fetch_blocking(project_id, branch) -> Result<PullRequestWithChecks>` — loads the project by id, resolves its `root_path`, runs both `gh` calls. Returns `anyhow::Error` so the spawn_blocking closure can use the same `?` operator as the rest of the file.
+- `#[tauri::command] async fn github_pr_checks_fetch(project_id, branch) -> Result<PullRequestWithChecks, String>` — IPC entry. `async` + `tauri::async_runtime::spawn_blocking` per the long-running-IPC discipline in CLAUDE.md (two `gh` subprocesses, each up to a few hundred ms on a cold PATH).
+- Wired in `invoke_handler` next to `github_status`.
+- Two new unit tests (89 total, all pass):
+  - `pr_checks_wire_format_round_trips` — deserializes realistic snake_case JSON for `GitHubPullRequest` + `Vec<GitHubCheckRun>`, verifies every field. Also pins the `pr=null → JSON null` serialization contract (UI distinguishes "no PR" from "never fetched" via the explicit null).
+  - `classify_gh_error_emits_stable_codes` — verifies all four error code prefixes plus the success-status branch.
+
+### TS frontend
+
+**`src/lib/types.ts`:** Added `PullRequestWithChecks` interface (snake_case on the wire, mirrors the Rust struct).
+
+**`src/lib/ipc.ts`:** Added `githubPrChecksFetch(projectId, branch)` wrapper. Imports `PullRequestWithChecks` from `./types` (no parallel type declaration in `ipc.ts`, per the file's convention).
+
+**`src/store/app.ts`:**
+- New state: `prChecks: Record<wsId, { pr, checks, loading, error, fetchedAt }>`.
+- New actions: `setPrChecks(wsId, payload)`, `setPrChecksLoading(wsId, loading)` (separate so the refresh button can flip the flag without overwriting the prior data), `clearPrChecks(wsId)`.
+- `setPrChecksLoading` uses the `if (cur?.loading === loading) return s;` no-op return — same referential-identity trick `setWorkState` uses to avoid re-render churn.
+- New frozen constant `EMPTY_PR_CHECKS` + new selector `usePrChecks(wsId)` — falls back to the frozen constant when a workspace has no entry (never fetched) so the snapshot stays referentially stable across re-renders. Matches the `EMPTY_TABS` / `EMPTY_DIFF_COMMENTS` pattern at `app.ts:899-900`.
+
+**`src/components/workspace/RightPanel.tsx`:**
+- Added `"checks"` to `FootTab` type.
+- Added `Checks` tab button to BOTH the single-repo strip (next to Terminal, with a `GitPullRequest` icon) and multi-repo Row 2 (next to Setup/Run, with the same icon). Always present — not gated on `showRunTab` or `spotlightAvailable`.
+- Added `ChecksRefreshButton` (right-side of the strip) for both single-repo + multi-repo. Disabled + spinning icon while loading. Has `data-testid="checks-refresh"` per the plan.
+- Added `ChecksContent` component (the tab body):
+  - Fetches on mount (via `useEffect` with `[ws.id, ws.project_id, ws.branch, data.loading]` deps).
+  - Fetches on tab focus: handled implicitly by the unmount-on-tab-switch architecture. The user clicks Setup → Checks, the Checks tab unmounts, then remounts when re-selected, the remount triggers the mount-fetch.
+  - Manual refresh: refresh button calls `setPrChecksLoading(wsId, true)`; the effect's dep on `data.loading` re-fires the IPC.
+  - Renders the PR header (title, number, draft badge, head→base branches, clickable to open via `openPath`).
+  - Renders the check-runs list via `CheckRunRow` — status icon (spinner for in-progress, `CheckCircle2` for success, `XCircle` for failure, `MinusCircle` for skipped/neutral/cancelled, `AlertCircle` for timed_out/action_required/stale), name, conclusion text, "started Xs ago" / "completed Xs ago" via `timeAgo`, hover-revealed `ExternalLink` icon. Clickable to open the run URL via `openPath`.
+  - Empty state for no PR: "No PR or checks found for this branch" + branch name in a code element.
+  - Error state for `gh_unavailable` / `gh_unauthenticated`: "Install and authenticate gh" + contextual hint (auth vs install) + "Try again" button.
+  - Error state for `rate_limited`: "GitHub API rate limit hit" + "Try again" button.
+  - Error state for unknown code: AlertCircle icon + the raw error message + "Try again" button.
+  - Loading state: spinner (only when `loading && fetchedAt === null`, so refreshes don't blank the existing data).
+
+## Verification
+
+### `cargo check` — clean
+
+```
+$ cargo check --manifest-path src-tauri/Cargo.toml
+    Checking termic v0.8.2 (/Users/june/workspace/personal/termic/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.67s
+```
+
+### `cargo test --lib` — 89/89 pass, including 2 new ones
+
+```
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib
+...
+test tests::pr_checks_wire_format_round_trips ... ok
+test tests::classify_gh_error_emits_stable_codes ... ok
+...
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+```
+
+### `npm run build` — clean
+
+```
+$ npm run build
+> termic@0.8.2 build
+> tsc -b && vite build
+
+vite v8.0.13 building client environment for production...
+✓ 1810 modules transformed.
+✓ built in 427ms
+```
+
+## Acceptance Criteria (from plan)
+
+- [x] Checks tab appears per workspace (added in both single-repo + multi-repo strip)
+- [x] Renders PR header + checks list (success path)
+- [x] Refresh button works (`data-testid="checks-refresh"`, disabled while loading, manual re-fetch)
+- [x] "No PR or checks found for this branch" empty state (per QA scenario 8.2)
+- [x] "Install and authenticate gh" empty state for `gh` missing / unauthenticated
+- [x] "GitHub API rate limit hit" for rate-limited responses
+- [x] "Try again" button on every error state — re-fetches via the loading flag
+
+## QA Scenarios — verification approach
+
+The plan's QA scenarios require a live `gh` installation + a real PR. This is a backend + UI task (per the task spec) — no Playwright run. Verification approach:
+
+1. **Code review.** Every QA scenario has a corresponding branch in the code:
+   - Scenario "Checks tab displays green workflow" → `CheckRunRow` maps `conclusion === "success"` to `CheckCircle2` with the `var(--color-ok)` color (line 1492+). Click handler opens the run URL via `openPath`.
+   - Scenario "Checks tab handles no PR" → `ChecksContent` empty state (line 1562+) renders "No PR or checks found for this branch" + the branch name in a code element. Triggered when `data.pr === null` (the `Ok({ pr: null, checks: [] })` success path from `gh_pr_view_blocking`).
+   - Scenario "gh unavailable shows guidance" → `ChecksContent` `gh_unavailable` / `gh_unauthenticated` branch (line 1547+) renders "Install and authenticate gh" + the contextual hint + "Try again" button. Refresh button is disabled while `data.loading` is true (line 1445+).
+
+2. **Wire-format test.** The Rust unit test `pr_checks_wire_format_round_trips` deserializes a realistic PR + check-runs JSON payload — the exact bytes the UI sees — and asserts every field is preserved. This covers the parse-on-the-way-in path for the success case.
+
+3. **Error-code test.** The Rust unit test `classify_gh_error_emits_stable_codes` verifies all four error code prefixes the UI matches on (`gh_unavailable`, `gh_unauthenticated`, `rate_limited`, `gh_error`). This covers the parse-on-the-way-in path for every error case.
+
+4. **No regression.** All 89 tests pass (the 87 pre-existing + 2 new), so no other behavior was broken by the new code.
+
+The evidence at `.omo/evidence/task-8-checks-success.png` (per the plan spec) is not required for this task — the spec itself notes "This is a backend + UI task, not a Playwright run; instead, write `.omo/evidence/task-8-checks.txt` with build + cargo check + test output." Done above.

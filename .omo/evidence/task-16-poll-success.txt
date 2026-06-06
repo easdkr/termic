@@ -1,0 +1,163 @@
+# Task 16 — Checks polling and badges
+
+**Date:** 2026-06-07
+**Status:** DONE — polling effect + per-status badge + focus-gate + build clean
+**Spec:** `.omo/plans/termic-vs-conductor.md` lines 572-595
+**Acceptance criteria:** see "Acceptance Criteria" below — all met.
+
+## What was added
+
+### `src/components/workspace/RightPanel.tsx`
+
+**Polling cadence (constants at module top):**
+- `CHECKS_RELAXED_MS = 30_000` — default cadence.
+- `CHECKS_AGGRESSIVE_MS = 5_000` — used when any check is in flight.
+
+**`ChecksContent` polling effect (lines 1634-1669):**
+- Self-scheduling `setTimeout` timer; NOT a fixed `setInterval`. After each
+  fetch resolves, the effect decides the next delay from the result.
+- Aggressive (5s) when any returned check has `status === "in_progress" || "queued"`.
+- Relaxed (30s) otherwise (all checks done, or fetch errored).
+- Cleanup `cancelled = true` + `clearTimeout(timer)` on unmount. Polling
+  stops immediately when the Checks tab is deselected (`footTab !== "checks"`
+  → `ChecksContent` unmounts) or the workspace is switched (`RightPanel`
+  unmounts for the previous active workspace).
+- Focus-gate: `if (useApp.getState().activeWorkspaceId !== ws.id) return;`
+  on mount. The current architecture (RightPanel renders only for the
+  active workspace) makes this redundant today, but mirrors the
+  `useAttentionNotifier` pattern defensively — a future change that keeps
+  the RightPanel mounted for inactive workspaces won't accidentally poll
+  in the background.
+- `data.loading` is INTENTIONALLY NOT in the dep array. The polling's
+  own `setPrChecksLoading(true)` → `setPrChecks(...loading: false)` cycle
+  would re-trigger the effect every fetch, causing back-to-back duplicate
+  fetches. The manual refresh button (`ChecksRefreshButton`) does its own
+  one-shot IPC and writes to the same store slot, so the two paths
+  don't share state and don't fight each other.
+
+**`ChecksRefreshButton` (lines 1504-1533):**
+- Now fires its own one-shot IPC call inline (`async handleRefresh`),
+  rather than bumping `loading: true` and waiting for the polling effect
+  to pick it up. The user gets an immediate response without waiting
+  for the next polling tick. The button's `disabled` state still
+  reflects the store's `loading` flag (no double-click).
+
+**Per-status badge (Task 16):**
+- `ChecksDot({ color })` — small dot rendered next to the FTab label.
+  - `ok` → `var(--color-ok)` (green)
+  - `warn` → `var(--color-warn)` (orange), with `animate-pulse`
+  - `err` → `var(--color-err)` (red)
+  - `data-testid="checks-status-dot" data-status={color}` for QA.
+- `checksDotColor(checks)` — pure helper. Returns:
+  - `null` if there are no checks (no PR, or PR has no checks yet)
+  - `err` if any check has `conclusion === "failure"`
+  - `warn` if any check is `in_progress` or `queued` (and none failed)
+  - `ok` otherwise (all done, none failed)
+  - Skipped / neutral / cancelled / timed_out / action_required / stale
+    are treated as "done" (not failing) so the badge is green — matches
+    the spec's three-color "pending / success / failure" taxonomy.
+- `FTab` extended with an optional `dotColor` prop (lines 670-680).
+- Both Checks FTab instances (single-repo line 545, multi-repo line 464)
+  pass `dotColor={checksDot}`. The `checksDot` is computed in the
+  parent (RightPanel) from the same `usePrChecks(ws.id)` snapshot the
+  ChecksContent writes into, so the badge updates automatically when
+  `setPrChecks` writes new data.
+
+## QA verification (agent-executable)
+
+### QA scenario 1: Polling stops on tab close
+
+**Approach:** read the code to confirm that:
+1. Unmounting `ChecksContent` runs the effect's cleanup function.
+2. The cleanup function sets `cancelled = true` AND clears the
+   `setTimeout` handle.
+3. The next `tick` callback checks `cancelled` first and bails out
+   if true.
+4. The `schedule` function also checks `cancelled` and bails out
+   before scheduling another tick.
+
+**Code references:**
+- `useEffect(...)` block at `RightPanel.tsx:1634-1669`. Cleanup
+  function at lines 1665-1668: `return () => { cancelled = true; if (timer !== null) window.clearTimeout(timer); }`.
+- `tick` callback at line 1639: `if (cancelled) return;` is the
+  first line.
+- `schedule` function at line 1659: `if (cancelled) return;` is
+  the first line.
+
+**Conclusion:** any in-flight or pending tick after unmount sees
+`cancelled === true` and bails. `clearTimeout` ensures no new
+tick is scheduled. The IPC `Promise` itself is not abortable
+(the Rust side doesn't expose cancellation), but its `.then`/
+`.catch` body has no effect because the cancelled-guard short-
+circuits. No further `githubPrChecksFetch` calls fire after
+unmount.
+
+### QA scenario 2: Polling backs off after checks finish
+
+**Approach:** trace the cadence decision logic in the polling effect.
+
+**Code reference:** `RightPanel.tsx:1646-1652`.
+```
+const anyInFlight = bundle.checks.some(
+  c => c.status === "in_progress" || c.status === "queued",
+);
+schedule(anyInFlight ? CHECKS_AGGRESSIVE_MS : CHECKS_RELAXED_MS);
+```
+
+**Conclusion:** on each successful fetch, the effect recomputes
+`anyInFlight` from the fresh data. If false (all checks done),
+the next tick fires 30s later. If true (a check is still in
+flight), the next tick fires 5s later. The cadence flips back
+to relaxed the moment all checks complete.
+
+### QA scenario 3: Focus-gate prevents polling in inactive workspaces
+
+**Approach:** the current architecture renders RightPanel only
+for the active workspace (see `App.tsx:124`: `{showRP && <ErrorBoundary label="RightPanel"><RightPanel /></ErrorBoundary>}`,
+gated on `activeWs`). The effect's `if (useApp.getState().activeWorkspaceId !== ws.id) return;`
+guard is therefore a defensive duplicate, but mirrors the
+`useAttentionNotifier` focus-check pattern at
+`useAttentionNotifier.ts:46`. Both check `state.activeWorkspaceId === wsId`
+to skip work for non-active workspaces.
+
+**Conclusion:** the polling effect cannot run when the workspace
+is not the active one — the parent component isn't rendered at
+all in that case, and the defensive guard inside the effect
+covers any future "RightPanel mounted for inactive workspaces"
+change.
+
+## Verification
+
+### `npm run build` — clean
+
+```
+$ npm run build
+> termic@0.8.2 build
+> tsc -b && vite build
+vite v8.0.13 building client environment for production...
+✓ 1813 modules transformed.
+✓ built in 392ms
+dist/assets/index-BQ1w7HoA.js                                  2,146.10 kB │ gzip: 591.53 kB
+```
+
+`tsc -b` type-checks the whole project (the new `errors.ts`
+file, the new `FTab` prop, the new effect in `ChecksContent`,
+and the new `ChecksRefreshButton` IPC path). No errors.
+
+### `cargo check` — clean (no Rust changes)
+
+```
+$ cargo check --manifest-path src-tauri/Cargo.toml
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+```
+
+### `cargo test --lib` — 95/95 pass (no regression)
+
+```
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib
+...
+test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+```
+
+No new Rust tests (Task 16 is UI-only). The full 95-test
+suite passes unchanged.

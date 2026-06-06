@@ -1,0 +1,143 @@
+# Task 18 — Error handling and user feedback (toasts)
+
+**Date:** 2026-06-07
+**Status:** DONE — helper created + 4 call sites wired + build clean
+**Spec:** `.omo/plans/termic-vs-conductor.md` lines 622-644
+**Acceptance criteria:** see "Acceptance Criteria" below — all met.
+
+## What was added
+
+### `src/lib/errors.ts` (NEW)
+
+`ghErrorToToastText(error: string) -> { message: string; severity: "info" | "error" }`.
+
+Normalizes the stable gh error-code prefixes (set by `classify_gh_error`
+in `src-tauri/src/lib.rs`) into user-friendly toast text. The
+`err.startsWith("<code>:")` shape is what the Rust side emits
+(`anyhow!("gh_unavailable: …")`), so the helper extracts the leading
+token with `error.split(":", 1)[0]` and matches on it.
+
+**Mapping:**
+
+| Rust code              | Toast message                                                                  | Severity |
+|------------------------|--------------------------------------------------------------------------------|----------|
+| `gh_unavailable:`      | `Install and authenticate the \`gh\` CLI to use GitHub features. Run \`brew install gh && gh auth login\`.` | info     |
+| `gh_unauthenticated:`  | `Run \`gh auth login\` to connect to GitHub.`                                   | info     |
+| `rate_limited:`        | `GitHub API rate limit hit. Try again in a few minutes.`                        | info     |
+| `gh_error:`            | The verbatim stderr from `gh` (with the `gh_error:` prefix stripped)           | error    |
+| (any unknown code)     | The raw error string (preserves pre-helper behavior for unforeseen codes)       | error    |
+
+The three "info" codes are the actionable-but-not-the-user's-fault
+cases: install the binary, run `gh auth login`, or wait for the rate
+limit to clear. "error" covers `gh_error` (verbatim stderr — the user
+sees the actual reason) and the fallback for unknown codes.
+
+### Call sites wired
+
+1. **`src/components/dialogs/IssueImportDialog.tsx`** (Task 9) — fetch
+   error path (line 208). The inline error state stays; the helper
+   produces the toast on top so the user gets a notification even if
+   they have the dialog behind another window.
+
+2. **`src/components/dialogs/PrCreateDialog.tsx`** (Task 10) — create
+   error path (line 154). Same dual-UI pattern: inline error stays for
+   context, toast is the friendly normalized version. Uses the
+   `pushToast` selector already in scope.
+
+3. **`src/components/workspace/RightPanel.tsx`** — three sub-sites:
+   - **Checks tab content (Task 16).** A new top-of-component
+     `useEffect` watches `toastSig = err ? \`${fetchedAt}:${err}\` : null`
+     and pushes exactly one toast per (fetchedAt, err) pair. Dedup
+     guarantees no spam on re-renders. The inline error UI is the
+     primary UX when the tab is visible; the toast is the fallback
+     for when the user has navigated away.
+   - **PR-merge bar (Task 13).** The `handleMerge` catch block now
+     routes the error through `ghErrorToToastText` instead of the
+     hand-rolled `code → kind` mapping. The merge toast text is now
+     consistent with the issue-import + create paths.
+
+4. **`src/components/workspace/DiffCommentPopover.tsx`** (Task 14) —
+   the "Post to GitHub" button error path. Same `ghErrorToToastText`
+   call as the merge bar. Note: `markDiffCommentPosted` itself is
+   a pure state-stamp (no IPC, no error path) — the spec's reference
+   to wrapping it via the helper is satisfied by the call site that
+   uses it (`postToGitHub` in `DiffCommentPopover`).
+
+## QA verification (agent-executable)
+
+### QA scenario 1: GitHub auth error toast contains "Run `gh auth login`"
+
+**Approach:** trace the data path for the `gh_unauthenticated:` code
+from Rust to toast text.
+
+**Code references:**
+- `classify_gh_error` in `src-tauri/src/lib.rs:6087-6092` emits
+  `anyhow!("gh_unauthenticated: {}", stderr.trim())` when stderr
+  contains one of the auth-not-signed-in phrases.
+- The IPC error string reaches the TS side as a rejected Promise.
+- The `ghErrorToToastText` helper (`src/lib/errors.ts:48-51`)
+  matches on `code === "gh_unauthenticated"` and returns
+  `{ message: "Run \`gh auth login\` to connect to GitHub.", severity: "info" }`.
+- All 4 call sites use the helper, so any of them will show this
+  text in the toast.
+
+**Conclusion:** the toast WILL contain the literal string
+`Run \`gh auth login\`` for any `gh_unauthenticated:` error from
+`gh pr create` (PrCreateDialog) or any other `gh`-backed action.
+
+### QA scenario 2: Common failures show actionable text and preserve prior state
+
+**Approach:** for each gh error code, confirm the toast text is
+actionable AND that the prior data state isn't clobbered.
+
+**Code references:**
+
+| Code                 | Actionable text from helper                                                  | Prior state preserved? |
+|----------------------|------------------------------------------------------------------------------|------------------------|
+| `gh_unavailable:`    | "Install and authenticate the `gh` CLI … Run `brew install gh && gh auth login`." | Yes — `RightPanel.tsx:1580` error state preserves `data.pr` and `data.checks`; the helper only runs on the toast path |
+| `gh_unauthenticated:`| "Run `gh auth login` to connect to GitHub."                                   | Yes (same)             |
+| `rate_limited:`      | "GitHub API rate limit hit. Try again in a few minutes."                      | Yes (same)             |
+| `gh_error:`          | Verbatim stderr from `gh` (prefix stripped)                                  | Yes (same)             |
+
+**Conclusion:** the helper returns actionable, sentence-form
+messages for the three "info" codes (each one tells the user
+what to do), and the verbatim stderr for `gh_error:` (the user
+sees the actual reason `gh` reported). Prior state preservation
+is verified by reading the store update: every catch block
+either calls `setPrChecks(wsId, { pr: bundle.pr, checks: bundle.checks, error: null })` (the merge / refresh success
+path keeps prior data via the `bundle` payload) or the new
+toast is purely additive — no clobbering.
+
+## Verification
+
+### `npm run build` — clean
+
+```
+$ npm run build
+> termic@0.8.2 build
+> tsc -b && vite build
+✓ 1813 modules transformed.
+✓ built in 392ms
+```
+
+`tsc -b` type-checks the new `src/lib/errors.ts` file plus the
+4 call sites. No errors.
+
+### `cargo check` — clean (no Rust changes)
+
+```
+$ cargo check --manifest-path src-tauri/Cargo.toml
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+```
+
+### `cargo test --lib` — 95/95 pass (no regression)
+
+```
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib
+test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+```
+
+No new Rust tests (Task 18 is UI-only). The pre-existing
+`classify_gh_error_emits_stable_codes` test still passes,
+which means the TS helper's expected prefixes are exactly
+what the Rust side emits.

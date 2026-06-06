@@ -1,0 +1,50 @@
+TASK 10 — PR create dialog: empty title blocked + gh missing caught
+=====================================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:422-445
+Subagent evidence: .omo/evidence/task-10-draft-pr.txt
+
+SCENARIO 1 — empty title blocked
+---------------------------------
+Frontend gate (src/components/dialogs/PrCreateDialog.tsx:108-112):
+  const trimmed = title.trim();
+  if (!trimmed) {
+    setTitleError("Title is required");
+    return;
+  }
+The setTitleError string matches the QA scenario's "Title is required"
+exactly. The inline error is rendered with data-testid="pr-dialog-title-error"
+and styled with text-[var(--color-err)] so the user sees the message
+under the title input. The user's next keystroke clears the error
+(setTitleError(null) on every change).
+
+Backend defense in depth (src-tauri/src/lib.rs:6511-6514):
+  let title = title.trim().to_string();
+  if title.is_empty() {
+      return Err("Title is required".into());
+  }
+Same exact error string — even if a future caller bypassed the JS check,
+the user gets the same message.
+
+SCENARIO 2 — gh missing caught
+-------------------------------
+Frontend pre-flight (PrCreateDialog.tsx:166-168):
+  const ghUnavailable = githubStatus !== null && !githubStatus.available;
+  const ghUnauth = githubStatus !== null && githubStatus.available && !githubStatus.authenticated;
+  const canCreate = !!ws && !!project && !ghUnavailable && !ghUnauth;
+The Create button is `disabled={!canCreate || submitting}`. When the
+githubStatus IPC returns `available=false`, canCreate flips to false and
+the button greys out.
+
+Backend spawn failure (src-tauri/src/lib.rs:6551):
+  .output()
+  .map_err(|e| format!("gh_unavailable: failed to spawn gh pr create: {}", e))?;
+A `Command::new("gh")` failure (binary missing) bubbles up as
+"gh_unavailable: failed to spawn gh pr create: …". The classify_gh_error
+fallback (lib.rs:6077-6085) also handles the "binary not found" case
+when the spawn returns an io error.
+
+VERDICT: PASS — empty title is blocked at TWO layers (client + Rust)
+with identical error strings, and gh missing is caught at THREE layers
+(pre-flight button disable, spawn error prefix, classify_gh_error
+fallback). Both backend paths route through classify_gh_error, and the
+classify_gh_error_emits_stable_codes test pins the exact prefix strings.

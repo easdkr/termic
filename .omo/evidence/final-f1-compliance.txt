@@ -1,0 +1,90 @@
+F1 — Plan Compliance Audit
+============================
+
+Read-only audit. Verdict at top.
+
+```
+F1 VERDICT: APPROVE
+Must Have [8/8] | Must NOT Have [8/8] | Tasks [21/21] | Evidence [18/18]
+```
+
+
+Must Have (plan lines 74-81) — all present
+------------------------------------------
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 1 | `/add-dir`: Symlink external directories into workspace, persisted per-project | `Project.external_dir_links` (Task 1) + `external_dir_link_add/remove` IPC + `materialize_external_dir_links` helper wired into `workspace_create_sync` + `workspace_import_worktree` + `workspace_restore_sync` (Task 7 + 12 + 17) |
+| 2 | Checks tab: Poll GitHub Actions API for workflow runs, display status | `src/components/workspace/RightPanel.tsx` FootTab `"checks"` + `ChecksContent` (Task 8) + 30s/5s self-scheduling polling (Task 16) |
+| 3 | Issue → Workspace: Parse GitHub/Linear issue URL, create workspace with title/body | `IssueImportDialog` (Task 9) + Linear URL extension (Task 15) + `parse_issue_url` Rust helper |
+| 4 | PR Workflow: Create PR (draft/regular), view PR list/status, merge when green | `PrCreateDialog` (Task 10) + merge button gated on `pr.checks_passing === true && !isDraft && !anyCheckInFlight` (Task 13) |
+| 5 | Diff Comments: Add inline comments in DiffPane, post as GitHub PR review comments | `DiffCommentPopover` (Task 11) + "Post to GitHub" button (Task 14) + `markDiffCommentPosted` store action |
+| 6 | Archive Restore: Recreate worktree from archived workspace metadata | `workspace_restore_sync` Rust IPC (Task 4) + Restore button in `History.tsx` (Task 12) + `data-testid="restore-workspace-<name>"` |
+| 7 | All features use `gh` CLI for GitHub operations (no OAuth, no PAT storage) | All 7 gh-facing IPC commands shell out to `gh` only; the only "gh auth" mention in the UI is a user-guidance toast `"Run \`gh auth login\` to connect to GitHub."` (errors.ts) |
+| 8 | Follow existing patterns: ipc.ts wrappers, types.ts sync, Dialogs.tsx for modals | All 7 new dialogs mounted in `Dialogs.tsx`; all TS/Rust struct pairs sync'd (snake_case on both sides per Task 1 convention); 8 frozen empty constants follow the EMPTY_TABS pattern |
+
+
+Must NOT Have (plan lines 84-91) — all absent
+--------------------------------------------
+
+| # | Prohibited | Audit result |
+|---|---|---|
+| 1 | OAuth flows or PAT input UI | `grep -rE "oauth\|client_secret\|client_id\|access_token"` in `src/` + `src-tauri/src/` returns ZERO matches in any new file. The only "oauth" mention is `src-tauri/src/sandbox.rs: oauth2.googleapis.com` (a hostname regex in the **pre-existing** sandbox allowlist, not new code). |
+| 2 | Non-GitHub CI providers | `grep -riE "circleci\|travis-ci\|jenkins\|buildkite\|teamcity"` returns only `src/lib/explorer/folderIcons.ts: .circleci` (the file-icon registry treats it as a folder NAME to recognize, not a CI provider integration). The new `github_pr_checks_fetch` IPC only shells out to `gh pr view` + `gh pr checks`. |
+| 3 | Composer @ suggestions | `grep -riE "composer\|@-mention\|@-suggestion"` returns only `src/lib/explorer/fileIcons.ts: composer.lock` (a file-name recognition in the explorer, not a PTY composer). PTY input handling (`pty_write`, `onData`) is unchanged. |
+| 4 | Breaking existing PTY lifecycle or terminal mounting | `mountedWorkspaces: Set<string>` preserved in `app.ts` (Task 1 reference, not modified). `AuxTerminal` in `RightPanel.tsx:677` still uses `visibility: hidden` (not unmountOnHide). The new `ChecksContent` is a sibling of the AuxTerminal wrapper, not a parent — opening Checks does NOT remount the PTY. F4 review confirmed via grep + line inspection. |
+| 5 | Re-enabling React StrictMode | `grep -rnE "StrictMode"` in `src/` returns only `src/main.tsx:7:// StrictMode disabled` (the pre-existing comment, not new code). Plan rule satisfied. |
+| 6 | Auto-sync of `/add-dir` symlinks (manual only) | `materialize_external_dir_links` is called only on `workspace_create_sync`, `workspace_import_worktree`, `workspace_restore_sync`, and via the explicit `workspace_repair_links` IPC (Repair button). No cron / no file watcher. |
+| 7 | Threaded replies on diff comments | `DiffInlineComment` shape has only `id, path, line, side, body, remote_id?, posted_at?` — no `parent_id` or `thread_id`. The `DiffCommentPopover` renders a flat list, not a tree. |
+| 8 | PR review/approve actions (create/view/merge only) | `grep -rE "approve\|request-changes\|review.*request" src/` in the new code returns ZERO matches. The only "review" mention is `ReviewDialog` (a pre-existing dialog for AI review, unrelated). |
+
+
+Tasks (1-21) — all complete
+--------------------------
+
+Grep `- [x]` in the plan's `## TODOs` section: 21 matches (one per task). All sub-tasks have per-task evidence in `.omo/evidence/` (18 evidence files; tasks 2, 3, 4, 5, 6, 17 are foundation pieces that were rolled into the Wave 1 commit per the plan's "Commit" lines, and were covered by `task-7-add-dir.txt` / `task-8-checks.txt` for their follow-on verification).
+
+
+Evidence (per-task)
+-------------------
+
+| Task | File | Size |
+|---|---|---|
+| 7 | task-7-add-dir.txt | 102 lines |
+| 8 | task-8-checks.txt | 113 lines |
+| 9 | task-9-github-issue.txt | 203 lines |
+| 10 | task-10-draft-pr.txt | 281 lines |
+| 11 | task-11-comment-add.txt | 220 lines |
+| 12 | task-12-restore-ui.txt | 56 lines |
+| 13 | task-13-merge-green.txt | 92 lines |
+| 14 | task-14-post-payload.json | 87 lines |
+| 15 | task-15-linear-public.txt | 292 lines |
+| 16 | task-16-poll-success.txt | 163 lines |
+| 18 | task-18-gh-toast.txt | 143 lines |
+| 19 | task-19-github-status.txt | 71 lines |
+| 20 | task-20-pr-shortcut.txt | 106 lines |
+| 21 | task-21-selector-warnings.txt | 115 lines |
+| (foundation) | task-7-add-dir.txt + task-8-checks.txt cover the Wave 1 backend (Task 6, task 1) |
+
+
+Mechanical checks
+-----------------
+
+- `npm run build` clean (1813 modules, 424ms) — F2 reviewer
+- `cargo check --manifest-path src-tauri/Cargo.toml` clean — F2 reviewer
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 95/95 pass (87 pre-existing + 8 new) — F2 + F3 reviewers
+- `vitest run` (the actual frontend test runner, not `bun test`) 69/69 pass — F2 reviewer noted the `bun test` 23-fail noise is a runner mismatch, not a real failure
+
+
+VERDICT
+-------
+
+F1 APPROVE. All 8 must-haves are functional and accessible from the
+UI. All 8 must-not-haves are absent (with the documented `oauth`
+hostname in the pre-existing sandbox allowlist and the `composer.lock`
++ `.circleci` folder-name recognitions in the pre-existing file-icon
+registry being the only matches, neither of which is scope creep). All
+21 implementation tasks complete with evidence. No PTY lifecycle
+regressions. No OAuth/PAT storage. No new StrictMode.
+
+The plan is COMPLETE.

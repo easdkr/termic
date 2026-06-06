@@ -1,0 +1,67 @@
+TASK 13 — PR merge button gated on green checks only
+======================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:497-520
+Subagent evidence: .omo/evidence/task-13-merge-green.txt
+
+Code location: src/components/workspace/RightPanel.tsx:1825-1850
+  // Enabled iff:
+  //   - pr.draft === false (drafts can't be merged)
+  //   - pr.checks_passing === true (all required checks green)
+  //   - no check is currently in flight (queued / in_progress)
+  const [merging, setMerging] = useState(false);
+  const anyCheckInFlight = data.checks.some(
+    c => c.status === "in_progress" || c.status === "queued",
+  );
+  // Disabled-reason precedence (most specific first):
+  //   draft > in-flight > waiting for checks > checks failing
+  const mergeDisabledReason: string | null = isDraft
+    ? "PR is a draft"
+    : anyCheckInFlight
+    ? "Checks running"
+    : pr.checks_passing === null
+    ? "Waiting for checks"
+    : pr.checks_passing === false
+    ? "Checks failing"
+    : null;
+  const mergeEnabled = mergeDisabledReason === null;
+
+The button (line 1930-1934):
+  <Button
+    size="sm"
+    variant="primary"
+    onClick={handleMerge}
+    disabled={!mergeEnabled || merging}
+    data-testid="checks-merge"
+  >
+
+Click handler (line 1851-1881):
+  - Guards on `!mergeEnabled || merging` (defense in depth)
+  - Opens useUI.askConfirm with title "Merge pull request", message
+    "Merge PR #N into <base>? The head branch will be deleted."
+  - On confirm: githubPrMerge({ projectId, prNumber, method: "squash" })
+  - On success: pushToast(`PR #${pr.number} merged`, "success") +
+    setPrChecksLoading(ws.id, true) to re-fetch
+  - On error: routes through ghErrorToToastText (Task 18)
+
+Backend (src-tauri/src/lib.rs:6688-6745):
+  - validate_pr_merge_method(method) accepts only "merge" / "squash" /
+    "rebase" (after trim). Pin test:
+    $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- validate_pr_merge_method
+    test tests::validate_pr_merge_method_accepts_documented_set ... ok
+  - github_pr_merge_blocking validates pr_number > 0, then shells out
+    to `gh pr merge <n> --<method> --delete-branch` in the project's
+    root_path. Errors route through classify_gh_error for the standard
+    prefixes.
+
+The tooltip content (line 1927):
+  content={mergeEnabled ? `Squash and merge PR #${pr.number}` : mergeDisabledReason ?? ""}
+So when checks are failing, the tooltip text is exactly "Checks failing"
+(matches the QA scenario's expected text). The left-side status text
+(line 1918-1924) also shows the same disabled reason so the user can
+see the gate state without hovering.
+
+VERDICT: PASS — the merge button is gated on three orthogonal conditions
+(non-draft, all-checks-green, no-in-flight-checks), the precedence chain
+picks the most actionable reason for the tooltip, and the Rust validator
+is defense in depth at the IPC boundary. End-to-end flow is gated through
+useUI.askConfirm for the destructive-ish action.

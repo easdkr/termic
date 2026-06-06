@@ -1,0 +1,84 @@
+TASK 16 — Polling stops on unmount + cadence switches on in-flight
+====================================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:572-595
+Subagent evidence: .omo/evidence/task-16-poll-success.txt
+
+SCENARIO 1 — polling stops on unmount
+--------------------------------------
+Code location: src/components/workspace/RightPanel.tsx:1657-1692
+
+  useEffect(() => {
+    if (useApp.getState().activeWorkspaceId !== ws.id) return;
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      setPrChecksLoading(ws.id, true);
+      try {
+        const bundle = await githubPrChecksFetch(ws.project_id, ws.branch);
+        if (cancelled) return;            // ← guard 1: in-flight tick
+        setPrChecks(ws.id, { ... });
+        const anyInFlight = bundle.checks.some(
+          c => c.status === "in_progress" || c.status === "queued",
+        );
+        schedule(anyInFlight ? CHECKS_AGGRESSIVE_MS : CHECKS_RELAXED_MS);
+      } catch (err) {
+        if (cancelled) return;            // ← guard 2: error-path tick
+        setPrChecks(ws.id, { pr: null, checks: [], error: String(err) });
+        schedule(CHECKS_RELAXED_MS);
+      }
+    };
+    const schedule = (delay: number) => {
+      if (cancelled) return;              // ← guard 3: pre-schedule
+      timer = window.setTimeout(tick, delay);
+    };
+
+    tick();
+    return () => {
+      cancelled = true;                   // ← cleanup flip
+      if (timer !== null) window.clearTimeout(timer);   // ← cleanup kill
+    };
+  }, [ws.id, ws.project_id, ws.branch, setPrChecks, setPrChecksLoading]);
+
+  // Note: data.loading is INTENTIONALLY NOT in the dep array.
+  // The polling's own loading true→false cycle would re-trigger
+  // the effect, causing back-to-back duplicate fetches.
+
+Three layers of unmount safety:
+  1. cancelled = true in the cleanup function
+  2. clearTimeout(timer) prevents the next scheduled tick from firing
+  3. The first line of every async path checks `if (cancelled) return;`
+     so any tick that already started aborts before writing to the store
+
+The IPC Promise itself is not abortable (the Rust side doesn't expose
+cancellation), but the .then/.catch body is a no-op once cancelled is
+true. No further githubPrChecksFetch calls fire after unmount.
+
+SCENARIO 2 — cadence switches on in-flight checks
+-------------------------------------------------
+Code location: src/components/workspace/RightPanel.tsx:37-38, 1672-1675
+
+  const CHECKS_RELAXED_MS = 30_000;
+  const CHECKS_AGGRESSIVE_MS = 5_000;
+
+  const anyInFlight = bundle.checks.some(
+    c => c.status === "in_progress" || c.status === "queued",
+  );
+  schedule(anyInFlight ? CHECKS_AGGRESSIVE_MS : CHECKS_RELAXED_MS);
+
+After each successful fetch, the effect recomputes anyInFlight from the
+fresh data:
+  - True  → next tick in 5s (aggressive — checks are running)
+  - False → next tick in 30s (relaxed — checks all done, or fetch errored)
+  - Error → 30s (don't hammer a broken IPC)
+
+The cadence flips back to relaxed the moment all checks complete. Manual
+refresh (the ChecksRefreshButton) does its own one-shot IPC and writes
+to the same store slot, so the two paths don't share state and don't
+fight each other.
+
+VERDICT: PASS — three layers of unmount safety (cancelled flag +
+clearTimeout + per-tick guard), and the cadence decision is a one-liner
+derived from the fresh data on every fetch. Both behaviors are
+deterministic from reading the code.

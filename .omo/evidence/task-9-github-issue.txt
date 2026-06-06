@@ -1,0 +1,203 @@
+Task 9 — Issue URL to workspace creation dialog
+================================================
+
+Files changed
+-------------
+
+Backend (Rust):
+  - src-tauri/src/lib.rs
+      * New:  `parse_github_issue_url(url) -> Result<(owner, repo, n), String>`
+        — strict hand-rolled parser; rejects everything that isn't
+        `https://github.com/<owner>/<repo>/issues/<n>`. Linear URLs
+        short-circuit to `"Linear authentication not configured"`
+        (Task 15 stub).
+      * New:  `github_issue_fetch_blocking(url) -> Result<IssueSeed, String>`
+        — shells out to `gh api repos/<owner>/<repo>/issues/<n> --jq
+        '{title, body, number, html_url}'`, parses JSON via a
+        private `GhIssueDto` struct, returns an `IssueSeed`. Failures
+        routed through `classify_gh_error` for the standard error
+        codes (`gh_unavailable` / `gh_unauthenticated` / `rate_limited`
+        / `gh_error`).
+      * New:  `#[tauri::command] async fn github_issue_fetch(url) ->
+        Result<IssueSeed, String>` — async + `spawn_blocking` per the
+        long-running-IPC discipline.
+      * Wired in `invoke_handler` next to `github_pr_checks_fetch`.
+      * New:  `setup_script: Option<String>` on `CreateWorkspaceArgs`,
+        consumed in `workspace_create_sync` to override
+        `effective_scripts(&proj)` for the issue-import flow.
+      * New:  2 unit tests:
+        - `parse_github_issue_url_recognises_supported_schemes` —
+          covers 5 valid URLs (incl. case-insensitive host, leading/
+          trailing whitespace, underscore + dot in owner/repo) and
+          22 invalid URLs (empty, wrong scheme, wrong host, wrong
+          path shape, query string, fragment, empty owner/repo,
+          invalid chars, non-positive number). Pin-only-on-prefix
+          for the rejection messages so future copy tweaks don't
+          break the test.
+        - `issue_seed_wire_format_round_trips` — pins the snake_case
+          wire shape and `body: null → None` deserialization.
+
+Frontend (TypeScript):
+  - src/lib/types.ts
+      * New:  `setup_script?: string` on `CreateWorkspaceArgs`.
+  - src/lib/ipc.ts
+      * New:  `githubIssueFetch(url) => invoke<IssueSeed>("github_issue_fetch", { url })`.
+  - src/store/ui.ts
+      * New:  `issueImportProjectId: string | null` + `openIssueImport(projectId)`
+        + `closeIssueImport()`. Lives in the UI store (not app) so
+        opening it doesn't churn the workspace tree — same pattern
+        as `newWorkspaceProjectId`.
+  - src/components/dialogs/IssueImportDialog.tsx (NEW)
+      * URL input + Fetch button. Enter in the URL field fires
+        Fetch; the form's onSubmit distinguishes Fetch (no fetched
+        data yet) from Create (success state).
+      * Editable title (auto-filled from fetched seed). Editable
+        branch (auto-derived from title + `prefixForTitle` heuristic:
+        `fix` for "fix / bug / regression", `feat` for "add / implement
+        / feature", else empty). Both are user-editable.
+      * Read-only body preview (max-h-180px + overflow-auto +
+        min-w-0 per CLAUDE.md sub-pixel + grid rules).
+      * "Use as setup note" checkbox — off by default per the plan
+        spec; when checked AND body is non-empty, the body is passed
+        as the per-workspace `setup_script` override on create.
+      * "Create workspace" button calls `workspaceCreate` (with the
+        override) + `loadAll` + `setActiveWorkspace` + `addTab` for
+        the default terminal tab, then closes the dialog.
+      * `submittingRef` guards against double-submit (same pattern
+        as NewWorkspaceDialog).
+  - src/components/dialogs/Dialogs.tsx
+      * Mounted `<IssueImportDialog />` next to the other dialogs.
+  - src/components/sidebar/ProjectActionsMenuItems.tsx
+      * Added "From issue URL" dropdown item (next to "New git
+        worktree") that calls `openIssueImport(projectId)`. Uses an
+        inline GitHub-mark SVG icon (hard-coded, same style as the
+        other lucide icons next to it). Hidden for non-git projects
+        (the worktree block is).
+
+URL validation rules
+-------------------
+
+`parse_github_issue_url` accepts exactly one shape:
+
+  https://github.com/<owner>/<repo>/issues/<n>
+
+  - scheme MUST be `https://` (plain `http://` rejected)
+  - host MUST be `github.com` (case-insensitive, WHATWG)
+  - path MUST be EXACTLY 4 segments: owner, repo, "issues", number
+  - owner + repo chars: `[A-Za-z0-9._-]+` (covers dots, hyphens, underscores)
+  - issue number: positive integer (1, 2, 3, …); 0 is rejected
+  - no trailing slash, no extra path segments, no query string, no fragment
+  - leading/trailing whitespace stripped
+
+Special cases:
+  - `linear.app/...` URLs → "Linear authentication not configured"
+    (short-circuits BEFORE the generic GitHub check so the user
+    gets the right "not configured" error, not "unsupported scheme")
+  - `github.com` PR URLs (`/pulls/<n>`) → rejected (the segment
+    count check fails)
+
+Dialog mount approach (useUI flag vs local state)
+-------------------------------------------------
+
+**useUI flag** (`issueImportProjectId: string | null`), mirroring
+`newWorkspaceProjectId`. Reasons:
+
+  - The dialog is project-scoped (it has to pick a project to
+    create the workspace in), and the trigger button lives on the
+    sidebar's per-project `+` menu. A single shared flag (vs
+    per-trigger local state) lets the same flag back the sidebar
+    trigger AND any future entry points (a global "Import from
+    URL" command, a keyboard shortcut, etc.) without re-plumbing.
+  - The `useUI` store is the file's established home for "I want
+    to open dialog X" state — it separates dialog visibility from
+    the workspace tree so flipping a flag doesn't churn the main
+    store (the rationale is in the existing `findInFilesWsId` /
+    `sandboxForWsId` JSDocs in the same file).
+  - Pattern consistency with the other dialog flags; no new
+    convention to teach.
+
+Build / cargo status
+--------------------
+
+  $ cargo check --manifest-path src-tauri/Cargo.toml
+      Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib
+      test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+      (89 prior + 2 new)
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib issue
+      running 2 tests
+      test tests::issue_seed_wire_format_round_trips ... ok
+      test tests::parse_github_issue_url_recognises_supported_schemes ... ok
+      test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 89 filtered out
+
+  $ npm run build
+      vite v8.0.13 building client environment for production...
+      ✓ 1811 modules transformed.
+      dist/assets/index--zGMZxCI.js                                  2,134.57 kB │ gzip: 588.75 kB
+      ✓ built in 382ms
+      (no TypeScript errors; the >500 kB chunk warning is pre-existing,
+       unrelated to this task)
+
+QA scenarios — verification approach
+------------------------------------
+
+This task is agent-executable rather than UI-executable (no Playwright
+in scope). Verification is by reading the produced code + the test
+output. Each plan scenario maps to a code/test assertion:
+
+  Scenario: GitHub issue seeds workspace
+    - URL validation accepts a real GitHub URL:
+      `parse_github_issue_url("https://github.com/acme/app/issues/123")`
+      returns `Ok(("acme", "app", 123))` — covered by the
+      `parse_github_issue_url_recognises_supported_schemes` test
+      case "https://github.com/acme/app/issues/123".
+    - The dialog calls `workspaceCreate` with name = slugified
+      title, branch = `${prefix}/${slug}` (or just `slug` if no
+      keyword matches), and (optionally) `setup_script: seed.body`
+      — `IssueImportDialog.tsx:140-148`.
+    - On success: `loadAll() + setActive(wsId) + addTab(...)` —
+      `IssueImportDialog.tsx:151-156`; dialog closes via `close()`.
+
+  Scenario: Invalid URL rejected
+    - `https://example.com/nope` → "Unsupported issue URL: ... (host
+      must be github.com)" — covered by the bad-input list in
+      `parse_github_issue_url_recognises_supported_schemes`.
+    - The Rust side returns this as the IPC Err string; the dialog
+      renders it in the red error banner — `IssueImportDialog.tsx:178-187`.
+
+  Scenario: gh unavailable
+    - When the `gh` binary is missing, `Command::new("gh").output()`
+      returns an io error → mapped to `"gh_unavailable: failed to
+      spawn gh api ..."` in `github_issue_fetch_blocking`.
+    - When `gh` is found but exits non-zero with no stderr,
+      `classify_gh_error(&failed, "")` returns
+      `"gh_unavailable: gh CLI exited with no output ..."`.
+    - Both error paths flow through the same `"gh_unavailable: ..."`
+      prefix the UI matches on (the Checks tab in Task 8 uses the
+      same prefix). Test coverage: the existing
+      `classify_gh_error_emits_stable_codes` test pins the
+      `gh_unavailable` prefix.
+
+  Scenario: gh unauthenticated
+    - When `gh` exits with an auth hint on stderr
+      ("To log in, run: gh auth login"), `classify_gh_error` returns
+      `"gh_unauthenticated: ..."`. Test coverage: the existing
+      `classify_gh_error_emits_stable_codes` test pins this branch.
+
+Notes
+-----
+
+  - The dialog does NOT auto-spawn the agent's first prompt with
+    the issue body. Task 14 (`gh api …` round-trip on the agent's
+    first turn) is the natural home for that; for now the body
+    flows only into the "Use as setup note" checkbox path.
+  - No OAuth. The IPC uses the user's existing `gh` install +
+    auth — same stance as the rest of the termic-vs-conductor
+    plan.
+  - No remote mutation. The Rust side only reads
+    (`gh api repos/.../issues/<n>`), never writes.
+  - PTY lifecycle untouched. The dialog creates a workspace; the
+    first PTY is mounted by the existing `WorkspaceView` mount
+    effect (no change to that path).

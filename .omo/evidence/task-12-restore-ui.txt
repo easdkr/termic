@@ -1,0 +1,56 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/termic_lib-dd143c23c00ee6fc)
+
+running 4 tests
+test tests::restore_validate_rejects_non_git_project ... ok
+test tests::restore_validate_rejects_repo_root_workspace ... ok
+test tests::restore_validate_returns_saved_path_for_valid_workspace ... ok
+test tests::restore_validate_rejects_missing_branch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 83 filtered out; finished in 0.09s
+
+
+=== FULL SUITE ===
+
+test result: ok. 87 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+
+=== CARGO CHECK ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+
+=== npm run build ===
+✓ built in 422ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+
+=== QA SCENARIO 1: Restore archived workspace (end-to-end git) ===
+Mirrors what workspace_restore_sync does internally: separate main
+checkout, add a worktree on a feature branch, archive (remove + prune),
+then re-add the worktree on the same branch. Confirms the core restore
+flow works against real git.
+
+--- git worktree add (initial create) ---
+Preparing worktree (checking out 'feature')
+HEAD is now at e28ed62 feature commit
+--- After create (worktree list) ---
+/private/var/folders/xm/9ftkg6k922l06msrtphjsxd40000gn/T/tmp.ADZATybEqj/main  cef34f0 [main]
+/private/var/folders/xm/9ftkg6k922l06msrtphjsxd40000gn/T/tmp.ADZATybEqj/wt    e28ed62 [feature]
+--- work/file.txt in worktree? ---
+yes
+
+--- After archive: worktree list ---
+/private/var/folders/xm/9ftkg6k922l06msrtphjsxd40000gn/T/tmp.ADZATybEqj/main  cef34f0 [main]
+--- wt dir gone? ---
+yes, removed
+
+--- git worktree add (restore) ---
+Preparing worktree (checking out 'feature')
+HEAD is now at e28ed62 feature commit
+--- After restore: worktree list ---
+/private/var/folders/xm/9ftkg6k922l06msrtphjsxd40000gn/T/tmp.ADZATybEqj/main  cef34f0 [main]
+/private/var/folders/xm/9ftkg6k922l06msrtphjsxd40000gn/T/tmp.ADZATybEqj/wt    e28ed62 [feature]
+--- work/file.txt back? ---
+yes

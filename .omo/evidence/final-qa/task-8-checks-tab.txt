@@ -1,0 +1,40 @@
+TASK 8 — Checks tab empty states
+==================================
+Plan reference: .omo/plans/termic-vs-conductor.md:372-395
+Subagent evidence: .omo/evidence/task-8-checks.txt
+
+Code locations traced:
+  - src/components/workspace/RightPanel.tsx:1712-1752 — gh_unavailable /
+    gh_unauthenticated branch renders "Install and authenticate gh" with the
+    contextual hint ("Run gh auth login" for unauth, "brew install gh && gh
+    auth login" for missing) + a Try-again button.
+  - src/components/workspace/RightPanel.tsx:1737-1752 — rate_limited branch
+    renders "GitHub API rate limit hit" + "Try again in a few minutes." +
+    Try-again button.
+  - src/components/workspace/RightPanel.tsx:1755-1771 — unknown code branch
+    renders AlertCircle + raw stderr + Try-again button.
+  - src/components/workspace/RightPanel.tsx:1783-1819 — "no PR" branch
+    renders "No PR or checks found for this branch" with the branch name in
+    a code element + an optional Create PR button (gated on !non_git &&
+    !is_repo_root).
+
+Backend wire-format pin: src-tauri/src/lib.rs:6071-6098 classify_gh_error
+emits the four stable prefixes (gh_unavailable, gh_unauthenticated,
+rate_limited, gh_error). The Rust unit test pins the exact strings:
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- classify_gh_error
+  test tests::classify_gh_error_emits_stable_codes ... ok
+
+The TS side does the prefix match with `err.split(":", 1)[0]`, which is
+robust to the message containing additional colons (e.g. URLs).
+
+The PR === null success path is the explicit "no PR" UX (the Rust
+github_pr_checks_fetch_blocking returns Ok({ pr: None, checks: [] })
+when gh_pr_view_blocking's stderr matches "no pull requests found for
+branch", and the wire-format test pr_checks_wire_format_round_trips pins
+the pr=null → JSON null shape).
+
+VERDICT: PASS — all three empty states are wired to stable code prefixes
+that the Rust side pins, and the Rust unit test confirms the prefix
+strings. The Checks tab appears per workspace, in both single-repo and
+multi-repo strip variants.

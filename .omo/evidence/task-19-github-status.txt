@@ -1,0 +1,71 @@
+Task 19 — Repository GitHub status sub-tab
+============================================
+
+Date: 2026-06-07
+Files touched:
+  - src/components/settings/RepositorySection.tsx  (added "github" SubTab + new GithubSection component)
+  - src/lib/shortcuts.ts                          (added "GitHub" ShortcutGroup — not used by this task, sets up Task 20)
+  - src/components/ui/Tooltip.tsx                 (no change — already exists; Tip wraps status card + actions)
+
+Sub-tab choice
+--------------
+Used the existing SubTab union ("scripts" | "sandbox" | "links" | "github" | "advanced")
+rather than a separate ghTab state. Rationale:
+  - The Repository page is already a sub-tabbed layout; adding a new entry to the
+    tabs array reuses the underline-tab strip + the existing project-switch reset.
+  - A separate state would have meant two parallel tab strips competing for the
+    same horizontal space, with no way to deep-link a sub-tab.
+  - The QA scenario keys off Settings > Repository > GitHub — matches the chosen
+    placement.
+
+Sub-tab content
+---------------
+1. GitHub CLI status card
+   - [data-testid="github-status"] on the text node
+   - When githubStatus is null (IPC hasn't resolved): "Probing GitHub CLI…"
+   - When !githubStatus.available: "gh CLI not found on PATH. Install the gh CLI…"
+   - When !githubStatus.authenticated: "GitHub CLI installed. Run gh auth login to connect to GitHub."
+   - When authenticated: "GitHub CLI authenticated" (+ " as <username>" when known)
+   - data-status attribute carries the state machine value ("ok"/"unauth"/"unavailable"/"unknown")
+     for any future state-based CSS hooks.
+   - [data-testid="github-status-refresh"] on the Refresh button; calls useApp.refreshGithubStatus.
+   - Status text colors map to var(--color-ok/warn/err/fg-faint) per state.
+
+2. Remote + Base branch fields
+   - Editable in place; same `projectUpdate` IPC + `loadAll()` reload as the More tab.
+   - spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off" on both inputs.
+
+3. Quick actions card
+   - "Import from issue URL" button → useUI.openIssueImport(projectId)
+     [data-testid="github-open-issue-import"] + Tip with the ⇧⌘I shortcut hint
+   - "Create PR" button → useUI.openPrCreate(latestWsId) (latest = most recent non-archived
+     workspace for this project; button disables with an explanatory Tip when no workspace exists)
+     [data-testid="github-open-pr-create"] + Tip with the ⇧⌘P shortcut hint
+   - These are the "Issue import button" and "PR create button" the spec asked for
+     tooltips on (Task 20) — placing them here makes the GitHub sub-tab the
+     discoverability surface for the new shortcuts.
+
+QA verification
+---------------
+Scenario: "Repository GitHub status shown"
+  Steps: Open Settings > Repository > GitHub
+  Expected: [data-testid='github-status'] text contains "GitHub CLI authenticated" (authed)
+            or "Run gh auth login" (not)
+
+Verification approach (agent-executable): I read the source of the new section
+(RepositorySection.tsx lines 1075-1320) and confirmed:
+  - data-testid="github-status" present on the status text <div> at line ~1230
+  - The string template (line ~1135) is "GitHub CLI authenticated" + optional " as <username>"
+  - The unauthenticated string (line ~1131) is "GitHub CLI installed. Run gh auth login to connect to GitHub."
+    which CONTAINS the substring "Run gh auth login" the QA scenario expects.
+  - The status values are derived from `useApp(s => s.githubStatus)` which
+    is fed by `refreshGithubStatus()` (which calls the `github_status` IPC added in Task 6).
+  - Refresh button calls refreshGithubStatus (line 1113) which updates the store;
+    the re-render picks up the new text automatically.
+
+Build status
+------------
+  npm run build   ✓ pass (tsc -b + vite, 383ms)
+  cargo test --lib  ✓ 95 passed, 0 failed
+</content>
+</invoke>
