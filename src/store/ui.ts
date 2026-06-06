@@ -78,6 +78,12 @@ interface UIState {
   fileFinderWsId: string | null;
   /** ⇧⌘F find-in-files dialog — workspace id, null = closed. */
   findInFilesWsId: string | null;
+  /** Issue-import dialog — project id to seed it for, null = closed.
+   *  Lives in UI store (not app) so opening it doesn't churn the
+   *  workspace tree. Mirrors `newWorkspaceProjectId` so the dialog
+   *  has a clear scope + the trigger button (`+` per project) can
+   *  identify which project the user is working in. */
+  issueImportProjectId: string | null;
   /** Global "blocking work in flight" message. Shows a centered loader over
    *  the whole window so the user knows the freeze is intentional. Set for
    *  unavoidably-synchronous IPC calls like `workspace_archive` that take
@@ -123,11 +129,13 @@ interface UIState {
   closeQueue: () => void;
   openSandbox: (wsId: string) => void;
   closeSandbox: () => void;
-  openFileFinder: (wsId: string) => void;
-  closeFileFinder: () => void;
-  openFindInFiles: (wsId: string) => void;
-  closeFindInFiles: () => void;
-  setBusy: (msg: string | null) => void;
+  openFileFinder:    (wsId: string) => void;
+  closeFileFinder:   () => void;
+  openFindInFiles:   (wsId: string) => void;
+  closeFindInFiles:  () => void;
+  openIssueImport:   (projectId: string) => void;
+  closeIssueImport:  () => void;
+  setBusy:           (msg: string | null) => void;
   /** Open the global confirm modal. Returns a Promise that resolves
    *  to true (user confirmed) or false (cancelled / dismissed). Drop-in
    *  replacement for `window.confirm()` with our own chrome + theming. */
@@ -191,6 +199,7 @@ export const useUI = create<UIState>(set => ({
   sandboxForWsId: null,
   fileFinderWsId: null,
   findInFilesWsId: null,
+  issueImportProjectId: null,
   busyMessage: null,
   confirm: null,
   terminalDrop: null,
@@ -224,6 +233,8 @@ export const useUI = create<UIState>(set => ({
   closeFileFinder:   () => set({ fileFinderWsId: null }),
   openFindInFiles:   (wsId) => set({ findInFilesWsId: wsId }),
   closeFindInFiles:  () => set({ findInFilesWsId: null }),
+  openIssueImport:   (projectId) => set({ issueImportProjectId: projectId }),
+  closeIssueImport:  () => set({ issueImportProjectId: null }),
   setBusy:           (msg) => set({ busyMessage: msg }),
   setNotifyRoute:    (route) => set({
     notifyRoute: route ? { ...route, firedAt: Date.now() } : null,

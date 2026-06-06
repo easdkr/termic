@@ -187,6 +187,13 @@ export interface CreateWorkspaceArgs {
    *  Rust falls back to the project's defaults verbatim. */
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Optional setup-script override for THIS workspace. When set
+   *  (non-empty after trim), bypasses the project-level
+   *  `effective_scripts` lookup and runs this string instead.
+   *  Used by the issue-import flow (Task 9) to seed the fetched
+   *  issue body as a setup note. Unset / empty = normal
+   *  project-derived setup script. */
+  setup_script?: string;
 }
 
 export interface Agent {

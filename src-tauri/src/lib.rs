@@ -446,6 +446,15 @@ pub struct CreateWorkspaceArgs {
     pub sandbox_rw_paths: Option<Vec<String>>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Option<Vec<String>>,
+    /// Optional setup-script override for THIS workspace. When set
+    /// (non-empty after trim), bypasses the project-level
+    /// `effective_scripts` lookup and runs this string instead.
+    /// Used by the issue-import flow (Task 9) so the fetched issue
+    /// body can be seeded as a setup note. Unset / empty = normal
+    /// project-derived setup script (including "no script" when the
+    /// project has none).
+    #[serde(default)]
+    pub setup_script: Option<String>,
 }
 
 // ───────────────────────────── paths ─────────────────────────────
@@ -2152,8 +2161,14 @@ fn workspace_create_sync(app: AppHandle, args: CreateWorkspaceArgs) -> Result<Wo
 
     // Run setup script in a background thread so the IPC handler returns
     // immediately and the UI doesn't freeze. Errors are surfaced via a
-    // notification rather than failing workspace creation.
-    let (setup_script, _, _) = effective_scripts(&proj);
+    // notification rather than failing workspace creation. The issue-
+    // import flow (Task 9) can pass a per-workspace override via
+    // `args.setup_script` to seed the issue body as a setup note; we
+    // fall back to the project-derived script otherwise.
+    let setup_script = match args.setup_script.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => effective_scripts(&proj).0,
+    };
     if !setup_script.trim().is_empty() {
         // Stream stdout+stderr to the frontend so the New Workspace dialog
         // can show live progress. Frontend listens on:
@@ -6077,6 +6092,148 @@ async fn github_pr_checks_fetch(
         .map_err(|e| e.to_string())
 }
 
+// ───────────────────────────── gh issue fetch (Task 9) ─────────────────────────────
+//
+// Task 9 of the termic-vs-conductor plan. The IssueImportDialog pastes a
+// GitHub issue URL, we shell out to `gh api repos/<owner>/<repo>/issues/<n>`
+// to fetch the title + body, and return an `IssueSeed` the dialog uses to
+// pre-fill the new-workspace form.
+//
+// Supported schemes (strict; everything else is rejected):
+//   https://github.com/<owner>/<repo>/issues/<n>
+//   - host is case-insensitive ("GitHub.com" works too)
+//   - no trailing path, no query string, no fragment
+//   - <n> is a positive integer
+//
+// Linear URLs (linear.app/...) are explicitly rejected with
+// "Linear authentication not configured" — Task 15 will add the real
+// Linear flow; this task is GitHub-only by design.
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable`, `gh_unauthenticated`,
+// `rate_limited`, fallback `gh_error`), routed through
+// `classify_gh_error` so the UI matches on the same prefixes it
+// already does for the Checks tab.
+
+/// Parse a GitHub issue URL into (owner, repo, number). Rejects
+/// everything that isn't `https://github.com/<owner>/<repo>/issues/<n>`
+/// with a clean error message. Pure function — no I/O — so it's
+/// unit-testable without spawning `gh`.
+///
+/// Issue number: positive integer (1, 2, 3, …). Number 0 doesn't
+/// exist on GitHub; we accept it and let `gh api` return a 404
+/// (classified as `gh_error` upstream).
+fn parse_github_issue_url(url: &str) -> Result<(String, String, u64), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Unsupported issue URL: empty string".into());
+    }
+    // Linear short-circuit BEFORE the generic GitHub check — a
+    // pasted linear.app URL must surface the "not configured"
+    // error, not the "unsupported scheme" one.
+    if trimmed.to_lowercase().contains("linear.app/") {
+        return Err("Linear authentication not configured".into());
+    }
+    // Hand-parse instead of using `url::Url` so we can emit
+    // precise per-failure error messages and reject plain `http://`.
+    let after_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .ok_or_else(|| format!("Unsupported issue URL: {} (expected https://github.com/...)", trimmed))?;
+    if trimmed.starts_with("http://") {
+        return Err(format!("Unsupported issue URL: {} (expected https)", trimmed));
+    }
+    let (host, rest) = after_scheme
+        .split_once('/')
+        .ok_or_else(|| format!("Unsupported issue URL: {} (no path)", trimmed))?;
+    if host.to_lowercase() != "github.com" {
+        return Err(format!("Unsupported issue URL: {} (host must be github.com)", trimmed));
+    }
+    // Strict segment count — rejects trailing slashes, query
+    // strings, fragments, and `/pulls/<n>` shape.
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.len() != 4 {
+        return Err(format!("Unsupported issue URL: {} (expected /<owner>/<repo>/issues/<n>)", trimmed));
+    }
+    let owner = segments[0];
+    let repo = segments[1];
+    let issues_word = segments[2];
+    let number_str = segments[3];
+    if owner.is_empty() || repo.is_empty() {
+        return Err(format!("Unsupported issue URL: {} (missing owner or repo)", trimmed));
+    }
+    if !owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || !repo.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(format!("Unsupported issue URL: {} (invalid owner or repo characters)", trimmed));
+    }
+    if issues_word != "issues" {
+        return Err(format!("Unsupported issue URL: {} (not an /issues/ URL)", trimmed));
+    }
+    let number: u64 = number_str
+        .parse()
+        .map_err(|_| format!("Unsupported issue URL: {} (issue number must be a positive integer)", trimmed))?;
+    if number == 0 {
+        return Err(format!("Unsupported issue URL: {} (issue number must be > 0)", trimmed));
+    }
+    Ok((owner.to_string(), repo.to_string(), number))
+}
+
+/// Fetch a GitHub issue's title + body via `gh api`. The `--jq`
+/// filter narrows the response to just the fields we need so we
+/// don't ship the whole 30-field issue object over IPC. Reuses
+/// `classify_gh_error` for the standard error codes
+/// (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` / `gh_error`).
+fn github_issue_fetch_blocking(url: String) -> Result<IssueSeed, String> {
+    let (owner, repo, number) = parse_github_issue_url(&url)?;
+    // The `--jq` filter must produce a JSON OBJECT (not an array)
+    // so `serde_json::from_str` deserializes it into a struct.
+    let endpoint = format!("repos/{}/{}/issues/{}", owner, repo, number);
+    let out = Command::new("gh")
+        .args([
+            "api", &endpoint,
+            "--jq", "{title: .title, body: .body, number: .number, html_url: .html_url}",
+        ])
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh api ({}): {}", endpoint, e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    #[derive(Deserialize)]
+    struct GhIssueDto {
+        title: String,
+        body: Option<String>,
+    }
+    let dto: GhIssueDto = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("gh_error: parse gh api response: {} (raw: {})", e, stdout))?;
+    Ok(IssueSeed {
+        source: IssueSource::Github,
+        // Mirror the URL the user pasted, not the API's `html_url`
+        // — same on github.com today, but the user's canonical form
+        // is what they meant to paste.
+        url: url.trim().to_string(),
+        title: dto.title,
+        // GitHub's `--jq` projects an empty body to JSON null, but
+        // the raw API also returns "" for empty. Normalize to None.
+        body: dto.body.filter(|s| !s.is_empty()),
+    })
+}
+
+/// IPC entry: fetch an issue's title + body for the issue-import
+/// dialog. Async + `spawn_blocking` per the long-running-IPC
+/// discipline (a cold `gh api` against an uncached repo can take a
+/// few hundred ms). Errors carry the same `"<code>: <message>"`
+/// prefix the rest of the `gh` surface uses — same pattern as
+/// `github_pr_checks_fetch`.
+#[tauri::command]
+async fn github_issue_fetch(url: String) -> Result<IssueSeed, String> {
+    tauri::async_runtime::spawn_blocking(move || github_issue_fetch_blocking(url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Enumerate every installed monospace font family on the system. Used by
 /// the Appearance picker so the user sees all real options, not just our
 /// curated probe list. Cached in-process via OnceLock.
@@ -6382,7 +6539,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status, github_pr_checks_fetch,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -7192,5 +7349,118 @@ mod tests {
         let e = classify_gh_error(&ok, "").to_string();
         assert!(e.starts_with("gh_error:"),
             "zero-exit with empty stderr must fall through to gh_error, got: {e}");
+    }
+
+    // ──────────────── gh issue URL parsing (Task 9) ────────────────
+
+    /// `parse_github_issue_url` is the gate between user-pasted input
+    /// and the `gh api` subprocess — every bad URL must surface as
+    /// "Unsupported issue URL: ..." (or "Linear authentication not
+    /// configured" for linear.app), and every good URL must
+    /// round-trip into (owner, repo, number). Covers the cases the
+    /// QA scenarios call out: a real GitHub URL parses; example.com
+    /// gets "Unsupported issue URL"; a Linear URL gets the
+    /// configured-for-Linear error.
+    #[test]
+    fn parse_github_issue_url_recognises_supported_schemes() {
+        // ───── valid URLs (positive cases) ─────
+        let cases: &[(&str, (String, String, u64))] = &[
+            ("https://github.com/acme/app/issues/123", ("acme".into(), "app".into(), 123)),
+            ("https://github.com/simion/termic/issues/1", ("simion".into(), "termic".into(), 1)),
+            ("https://GitHub.com/acme/app/issues/42", ("acme".into(), "app".into(), 42)),
+            ("  https://github.com/acme/app/issues/7  ", ("acme".into(), "app".into(), 7)),
+            ("https://github.com/my_org/my.repo.js/issues/9999",
+             ("my_org".into(), "my.repo.js".into(), 9999)),
+        ];
+        for (input, expected) in cases {
+            let got = parse_github_issue_url(input)
+                .unwrap_or_else(|e| panic!("expected {input} to parse, got err: {e}"));
+            assert_eq!(got, *expected, "input: {input}");
+        }
+
+        // ───── invalid URLs (negative cases) ─────
+        // The error prefix is what the UI matches on — pin only the
+        // prefix, not the exact message, so future message tweaks
+        // don't break the test.
+        let bad: &[&str] = &[
+            // empty / whitespace
+            "",
+            "   ",
+            // missing scheme
+            "github.com/acme/app/issues/1",
+            // wrong scheme
+            "ftp://github.com/acme/app/issues/1",
+            "http://github.com/acme/app/issues/1",   // plain http rejected
+            // wrong host
+            "https://example.com/acme/app/issues/1",
+            "https://gitlab.com/acme/app/issues/1",
+            "https://api.github.com/repos/acme/app/issues/1",
+            // wrong path shape
+            "https://github.com/acme/app",                 // no /issues/N
+            "https://github.com/acme/app/",               // trailing slash
+            "https://github.com/acme/app/issues/",         // missing number
+            "https://github.com/acme/app/pulls/1",         // PR URL, not issue
+            "https://github.com/acme/app/issues/1/extra", // extra segment
+            "https://github.com/acme/app/issues/1?foo=1",  // query string
+            "https://github.com/acme/app/issues/1#anchor", // fragment
+            // empty owner/repo
+            "https://github.com//app/issues/1",
+            "https://github.com/acme//issues/1",
+            // invalid characters in owner/repo
+            "https://github.com/acme$/app/issues/1",
+            // non-positive number
+            "https://github.com/acme/app/issues/0",
+            "https://github.com/acme/app/issues/abc",
+            "https://github.com/acme/app/issues/-1",
+        ];
+        for input in bad {
+            let result = parse_github_issue_url(input);
+            assert!(result.is_err(), "expected {input:?} to be rejected, got Ok: {:?}", result.ok());
+            let err = result.unwrap_err();
+            let ok_prefix = err.starts_with("Unsupported issue URL: ")
+                || err == "Linear authentication not configured";
+            assert!(ok_prefix, "unexpected error shape for {input:?}: {err}");
+        }
+
+        // ───── Linear short-circuit ─────
+        // Runs BEFORE the generic GitHub check; the user-facing
+        // error must be the Linear one, not "Unsupported issue URL".
+        let r = parse_github_issue_url("https://linear.app/termic/issue/ABC-123");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err(), "Linear authentication not configured");
+    }
+
+    /// `IssueSeed` round-trips through the wire format the UI sees
+    /// (snake_case, `body: Option<String>`). Mirrors the wire test
+    /// for `PullRequestWithChecks` from Task 8.
+    #[test]
+    fn issue_seed_wire_format_round_trips() {
+        let json = r#"{
+            "source": "github",
+            "url": "https://github.com/acme/app/issues/42",
+            "title": "Fix login bug",
+            "body": "Steps to reproduce:\n1. ...\n2. ..."
+        }"#;
+        let seed: IssueSeed = serde_json::from_str(json)
+            .expect("IssueSeed wire format must deserialize");
+        assert_eq!(seed.source, IssueSource::Github);
+        assert_eq!(seed.url, "https://github.com/acme/app/issues/42");
+        assert_eq!(seed.title, "Fix login bug");
+        assert!(seed.body.is_some());
+        let s = serde_json::to_string(&seed).unwrap();
+        assert!(s.contains("\"source\":\"github\""));
+        assert!(s.contains("\"title\":\"Fix login bug\""));
+        assert!(s.contains("\"body\":"));
+
+        // body = null is a valid shape for an empty body. The dialog
+        // checks `body == null` to render the "no body" empty state.
+        let json_no_body = r#"{
+            "source": "github",
+            "url": "https://github.com/acme/app/issues/43",
+            "title": "Empty",
+            "body": null
+        }"#;
+        let seed: IssueSeed = serde_json::from_str(json_no_body).unwrap();
+        assert!(seed.body.is_none(), "null body must deserialize as None");
     }
 }

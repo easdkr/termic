@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig, GitHubStatus,
-  PullRequestWithChecks,
+  PullRequestWithChecks, IssueSeed,
 } from "./types";
 
 // ───────────────────────────── projects ─────────────────────────────
@@ -364,6 +364,19 @@ export type GithubStatus = GitHubStatus;
  *  take a few hundred ms on a cold PATH. */
 export const githubPrChecksFetch = (projectId: string, branch: string) =>
   invoke<PullRequestWithChecks>("github_pr_checks_fetch", { projectId, branch });
+
+/** Fetch a GitHub issue's title + body for the issue-import dialog.
+ *  Accepts `https://github.com/<owner>/<repo>/issues/<n>` URLs
+ *  (case-insensitive host, strict path — no trailing slash, no
+ *  query, no fragment). Rejects Linear URLs with
+ *  "Linear authentication not configured" and everything else with
+ *  "Unsupported issue URL: …". Error prefix uses the same stable
+ *  codes as `githubPrChecksFetch` (`gh_unavailable:` /
+ *  `gh_unauthenticated:` / `rate_limited:` / `gh_error:`). Async +
+ *  spawn_blocking on the Rust side — a cold `gh api` against an
+ *  uncached repo can take a few hundred ms. */
+export const githubIssueFetch = (url: string) =>
+  invoke<IssueSeed>("github_issue_fetch", { url });
 
 // ───────────────────────────── misc ─────────────────────────────
 

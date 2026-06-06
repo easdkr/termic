@@ -50,6 +50,7 @@ export function ProjectActionsMenuItems({ projectId, onPickRepoCli }: {
   const loadAll = useApp(s => s.loadAll);
   const openNewWorkspace = useUI(s => s.openNewWorkspace);
   const openCustomCommand = useUI(s => s.openCustomCommand);
+  const openIssueImport = useUI(s => s.openIssueImport);
   // Multi-repo projects need different copy: "New worktree" means
   // branched copies of EVERY member, and "Open repo" means the host
   // dir with live symlinks to each member checkout — same actions,
@@ -134,6 +135,29 @@ export function ProjectActionsMenuItems({ projectId, onPickRepoCli }: {
               <span className="truncate">New git worktree</span>
               <span className="text-[11.5px] text-[var(--color-fg-faint)]">
                 {isMulti ? "Separate working directory per member, run agents in parallel" : "Separate working directory, run agents in parallel"}
+              </span>
+            </div>
+          </DropdownItem>
+          {/* "Import from issue" — opens the IssueImportDialog for this
+              project. Lives in the worktree block because it creates
+              a new worktree the same way "New git worktree" does;
+              the issue body just seeds the title + (optionally) the
+              setup script. Hidden for non-git projects because the
+              resulting workspace would be a flat folder with no
+              branch to put the issue in. */}
+          <DropdownItem onSelect={() => openIssueImport(projectId)}>
+            <svg
+              className="h-4 w-4 shrink-0 text-[var(--color-fg-dim)]"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.62 7.62 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z" />
+            </svg>
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate">From issue URL</span>
+              <span className="text-[11.5px] text-[var(--color-fg-faint)]">
+                Paste a GitHub issue to seed the workspace
               </span>
             </div>
           </DropdownItem>
