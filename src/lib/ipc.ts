@@ -261,6 +261,13 @@ export const workspaceSpotlightStatus  = ()           => invoke<Record<string, s
  *  path. Used when dropping a file onto a sandboxed agent terminal. */
 export const terminalStageFile = (wsId: string, src: string) =>
   invoke<string>("terminal_stage_file", { wsId, src });
+
+/** Save clipboard image bytes to a temp file and return the absolute path.
+ *  The file lives in `$TMPDIR/termic-paste/<ws_id>/` — separate from drop
+ *  staging so it can be cleaned independently. Stale files (> 1h) are purged
+ *  automatically on each call; the whole tree is wiped on app exit. */
+export const saveClipboardImage = (wsId: string, imageData: number[], ext: string) =>
+  invoke<string>("save_clipboard_image", { wsId, imageData, ext });
 export const workspaceFileDiff = (id: string, path: string) => invoke<string>("workspace_file_diff", { id, path });
 export const workspaceFileDiffSides = (id: string, path: string) =>
   invoke<{ original: string; modified: string }>("workspace_file_diff_sides", { id, path });

@@ -357,24 +357,49 @@ export function TerminalPane({ ws, tab, active }: Props) {
     term.open(host);
     termRef.current = term;
     fitRef.current = fit;
-    const inputProxy = installTerminalInputProxy(host, term, (text) => {
-      const pid = ptyRef.current;
-      if (!pid) return;
-      if (text.indexOf("\r") !== -1 || text.indexOf("\n") !== -1) {
-        settledRef.current = { lastHash: 0, unchangedCount: 0, marked: false };
-        scrollbackRef.current = { lastLen: -1, stableCount: 0, marked: false };
-        const cur = useApp.getState().tabs[ws.id]?.find(t => t.id === tab.id);
-        if (cur?.type === "terminal" && cur.workState === "done") setWorkState(ws.id, tab.id, "idle");
-        if (cur?.unread) useApp.getState().clearAttention(ws.id, tab.id);
-        patchTab(ws.id, tab.id, { lastInputAt: Date.now() });
-        submittedSinceSpawnRef.current = true;
-        submitAtRef.current = Date.now();
-        submitWindowUntilRef.current = submitAtRef.current + 5_000;
-        preSubmitHashRef.current = hashVisibleBuffer(term);
-        doneFiredSinceSubmitRef.current = false;
-      }
-      ipc.ptyWrite(pid, Array.from(new TextEncoder().encode(text))).catch(() => {});
-    });
+    const inputProxy = installTerminalInputProxy(
+      host,
+      term,
+      (text) => {
+        const pid = ptyRef.current;
+        if (!pid) return;
+        if (text.indexOf("\r") !== -1 || text.indexOf("\n") !== -1) {
+          settledRef.current = { lastHash: 0, unchangedCount: 0, marked: false };
+          scrollbackRef.current = { lastLen: -1, stableCount: 0, marked: false };
+          const cur = useApp.getState().tabs[ws.id]?.find(t => t.id === tab.id);
+          if (cur?.type === "terminal" && cur.workState === "done") setWorkState(ws.id, tab.id, "idle");
+          if (cur?.unread) useApp.getState().clearAttention(ws.id, tab.id);
+          patchTab(ws.id, tab.id, { lastInputAt: Date.now() });
+          submittedSinceSpawnRef.current = true;
+          submitAtRef.current = Date.now();
+          submitWindowUntilRef.current = submitAtRef.current + 5_000;
+          preSubmitHashRef.current = hashVisibleBuffer(term);
+          doneFiredSinceSubmitRef.current = false;
+        }
+        ipc.ptyWrite(pid, Array.from(new TextEncoder().encode(text))).catch(() => {});
+      },
+      {
+        onImagePaste: async (file) => {
+          const pid = ptyRef.current;
+          if (!pid) return;
+          try {
+            const buf = await file.arrayBuffer();
+            const ext = file.type === "image/png" ? "png"
+              : file.type === "image/jpeg" ? "jpg"
+              : file.type === "image/gif" ? "gif"
+              : file.type === "image/webp" ? "webp"
+              : "png";
+            const path = await ipc.saveClipboardImage(ws.id, Array.from(new Uint8Array(buf)), ext);
+            // Escape the path the same way terminalDrop.ts does so spaces,
+            // parens, $, etc. survive into the prompt.
+            const escaped = path.replace(/[^A-Za-z0-9._/-]/g, "\\$&");
+            ipc.ptyWrite(pid, Array.from(new TextEncoder().encode(escaped + " "))).catch(() => {});
+          } catch (e) {
+            useUI.getState().pushToast(`Couldn't paste image: ${e}`, "error");
+          }
+        },
+      },
+    );
     inputProxyRef.current = inputProxy;
 
     // Drop target: dragging a file (screenshot, etc.) onto this terminal

@@ -68,10 +68,18 @@ export function terminalKeyData(e: KeyboardEvent, term: Pick<Terminal, "modes">)
   return ctrlKeyData(e);
 }
 
+export interface TerminalInputProxyOpts {
+  /** Called when an image is pasted from the clipboard.
+   *  The handler should save the file and write its path into the PTY.
+   *  When omitted, image paste is silently ignored (legacy behaviour). */
+  onImagePaste?: (file: File) => void;
+}
+
 export function installTerminalInputProxy(
   host: HTMLElement,
   term: Terminal,
   sendData: (data: string) => void,
+  opts?: TerminalInputProxyOpts,
 ): TerminalInputProxy {
   const xtermTextarea = term.textarea;
   const xtermEl = host.querySelector(".xterm") as HTMLElement | null;
@@ -159,6 +167,21 @@ export function installTerminalInputProxy(
   };
 
   const onPaste = (ev: ClipboardEvent) => {
+    const items = ev.clipboardData?.items;
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.startsWith("image/")) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const file = item.getAsFile();
+          if (file) {
+            opts?.onImagePaste?.(file);
+          }
+          return;
+        }
+      }
+    }
     const text = ev.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
     ev.preventDefault();

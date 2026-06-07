@@ -5207,6 +5207,45 @@ fn terminal_stage_file(ws_id: String, src: String) -> Result<String, String> {
     Ok(dest.to_string_lossy().into_owned())
 }
 
+/// Save clipboard image bytes to a temp file so the agent can read it.
+///
+/// Images pasted into the terminal are written to
+/// `$TMPDIR/termic-paste/<ws_id>/paste-<uuid>.<ext>` — a separate directory
+/// from `termic-attachments` (drop files) so we can clean them independently.
+/// `$TMPDIR` is already in the sandbox's runtime allow set.
+///
+/// Stale files older than 1 hour are cleaned on each call to prevent
+/// accumulation. The entire `termic-paste/` tree is also wiped on app exit.
+#[tauri::command]
+fn save_clipboard_image(ws_id: String, image_data: Vec<u8>, ext: String) -> Result<String, String> {
+    let safe_ws: String = ws_id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let dir = std::env::temp_dir().join("termic-paste").join(&safe_ws);
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir paste dir: {e}"))?;
+
+    // Clean up stale files (> 1 hour) before writing a new one.
+    let ttl = std::time::Duration::from_secs(3600);
+    let now = std::time::SystemTime::now();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if now.duration_since(modified).unwrap_or_default() > ttl {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+
+    let safe_ext = ext.trim_start_matches('.').to_lowercase();
+    let safe_ext = if safe_ext.is_empty() { "png".into() } else { safe_ext };
+    let dest = dir.join(format!("paste-{}.{}", Uuid::new_v4(), safe_ext));
+    fs::write(&dest, &image_data).map_err(|e| format!("write paste image: {e}"))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 /// Rust-side log append. Mirror of `log_line` IPC but callable from
 /// anywhere in the crate (proxy.rs / sandbox.rs / spawn paths).
 /// Persistent file lets us debug post-mortem; eprintln stderr only
@@ -7374,7 +7413,7 @@ pub fn run() {
             workspace_changes, workspace_file_diff, workspace_file_diff_sides, workspace_file_read, workspace_file_write, workspace_dir_list,
             workspace_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,
-            notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
+            notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file, save_clipboard_image,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
             list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, linear_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
         ])
@@ -7451,6 +7490,10 @@ fn cleanup_children(app: &tauri::AppHandle) {
             }
         }
     }
+    // 3. Clipboard paste images — wipe the entire temp tree on exit so
+    //    we don't leave orphaned image files behind.
+    let paste_dir = std::env::temp_dir().join("termic-paste");
+    let _ = fs::remove_dir_all(&paste_dir);
 }
 
 /// True on macOS Tahoe (26) and later. Gates the Tahoe-specific window
