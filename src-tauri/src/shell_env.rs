@@ -47,7 +47,11 @@ fn resolve_inner() -> String {
 
     match probe_login_shell() {
         Some(p) if !p.is_empty() => p,
-        _ => fallback_path(&current),
+        _ => {
+            let merged = fallback_path(&current);
+            eprintln!("[shell_env] login-shell probe failed or timed out; using merged PATH: {merged}");
+            merged
+        }
     }
 }
 
@@ -107,6 +111,14 @@ pub(crate) fn fallback_path(current: &str) -> String {
         format!("{home}/n/bin"),
         format!("{home}/.kimi-code/bin"),
         format!("{home}/.opencode/bin"),
+        // GitHub CLI installed via Homebrew or manual installer
+        format!("{home}/.gh/bin"),
+        // mise (formerly rtx) shims
+        format!("{home}/.local/share/mise/shims"),
+        // fnm / nvm node version shims (gh may be installed via npm)
+        format!("{home}/.fnm/aliases/default/bin"),
+        // asdf shims
+        format!("{home}/.asdf/shims"),
     ];
 
     let mut seen: std::collections::HashSet<String> =

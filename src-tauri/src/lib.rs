@@ -5860,26 +5860,42 @@ pub struct GithubStatus {
 /// `where` but the project's primary targets are macOS/Linux today so
 /// this stays simple. Returns the resolved path, or empty on miss.
 fn gh_resolve_path() -> String {
-    // Bind the `Command` to a `let` so the temporary lives long enough
-    // for `probe.output()` to borrow from it (rustc E0716 catches the
-    // implicit-drop variant of this if/else form).
-    let mut probe: Command = if cfg!(target_os = "windows") {
-        let mut c = Command::new("where");
-        c.arg("gh");
-        c
-    } else {
-        let mut c = Command::new("which");
-        c.arg("gh");
-        c
-    };
-    probe
-        .env("PATH", shell_env::resolved_path())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default()
+    // Try the resolved PATH first (login-shell or fallback), but if that
+    // misses, also probe the OS-native PATH. GUI-launched .app bundles
+    // on macOS get a bare PATH from launchd, but the user may have gh
+    // in a location only visible through the native resolver (e.g. a
+    // symlink in /usr/local/bin that the login-shell probe didn't pick
+    // up because it timed out).
+    let resolved = shell_env::resolved_path();
+    let native = std::env::var("PATH").unwrap_or_default();
+
+    for path_env in [&resolved, &native] {
+        if path_env.is_empty() {
+            continue;
+        }
+        let mut probe: Command = if cfg!(target_os = "windows") {
+            let mut c = Command::new("where");
+            c.arg("gh");
+            c
+        } else {
+            let mut c = Command::new("which");
+            c.arg("gh");
+            c
+        };
+        let result = probe
+            .env("PATH", path_env)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(p) = result {
+            dlog(&format!("[gh_resolve_path] found gh at {p} via PATH={path_env}"));
+            return p;
+        }
+    }
+    dlog(&format!("[gh_resolve_path] gh not found. resolved_path={resolved}, native_path={native}"));
+    String::new()
 }
 
 fn gh_command() -> Command {
@@ -5889,7 +5905,22 @@ fn gh_command() -> Command {
     } else {
         Command::new(path)
     };
-    cmd.env("PATH", shell_env::resolved_path());
+    // Merge resolved PATH (login-shell / fallback) with the native PATH.
+    // GUI-launched apps on macOS inherit a bare PATH from launchd; the
+    // resolved PATH covers user-installed tools, but if the login-shell
+    // probe timed out the fallback may miss locations the OS resolver
+    // still knows about. Union both so gh and its subcommands find
+    // everything they need.
+    let resolved = shell_env::resolved_path();
+    let native = std::env::var("PATH").unwrap_or_default();
+    let merged = if resolved.is_empty() {
+        native.clone()
+    } else if native.is_empty() {
+        resolved.clone()
+    } else {
+        format!("{resolved}:{native}")
+    };
+    cmd.env("PATH", merged);
     cmd
 }
 
