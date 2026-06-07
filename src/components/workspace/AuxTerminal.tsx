@@ -18,10 +18,6 @@ import { installTerminalInputProxy } from "@/lib/terminalIme";
 import * as ipc from "@/lib/ipc";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg } from "@/store/prefs";
 
-// Theme is no longer a module-level constant - see TerminalPane for why.
-// `currentTerminalTheme()` picks the matching palette at mount; the
-// themeMode effect below pushes updates into live instances.
-
 export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; active: boolean; onExited?: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -192,16 +188,6 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
     try { fitRef.current?.fit(); } catch {}
     if (ptyRef.current) ipc.ptyResize(ptyRef.current, t.rows, t.cols).catch(() => {});
   }, [terminalFontId, terminalFontSize, terminalLetterSpacing]);
-
-  // Live theme swap mirrors TerminalPane's effect; see the comment there.
-  const themeMode = usePrefs(s => s.themeMode);
-  const firstThemeRun = useRef(true);
-  useEffect(() => {
-    if (firstThemeRun.current) { firstThemeRun.current = false; return; }
-    const t = termRef.current;
-    if (!t) return;
-    t.options.theme = currentTerminalTheme() as any;
-  }, [themeMode]);
 
   return (
     <div className="relative h-full w-full">

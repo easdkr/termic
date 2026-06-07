@@ -3,12 +3,12 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const button = cva(
-  "inline-flex items-center justify-center gap-1.5 rounded-md whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-soft)] disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-1.5 rounded-md whitespace-nowrap font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        primary: "bg-[var(--color-accent-deep)] text-white hover:brightness-110 border border-[var(--color-accent-deep)]",
-        secondary: "bg-[var(--color-bg-2)] text-[var(--color-fg)] hover:border-[var(--color-accent-soft)] border border-[var(--color-border)]",
+        primary: "bg-gradient-to-b from-[var(--color-accent)] to-[var(--color-accent-deep)] text-white hover:brightness-110 border border-[var(--color-accent)]/50",
+        secondary: "bg-[var(--color-bg-2)] text-[var(--color-fg)] hover:bg-[var(--color-bg-3)] border border-[var(--color-border)]",
         ghost: "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
         icon: "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] rounded-md",
         danger: "bg-[var(--color-err)]/15 text-[var(--color-err)] border border-[var(--color-err)]/30 hover:bg-[var(--color-err)]/25",

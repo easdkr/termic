@@ -104,7 +104,7 @@ export function UpdateCard() {
           type="button"
           onClick={() => void install()}
           disabled={installing !== null}
-          className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--color-accent-deep)] px-2 py-1.5 text-[12px] font-medium text-white hover:bg-[#8a3a1c] disabled:opacity-70"
+          className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--color-accent-deep)] px-2 py-1.5 text-[12px] font-medium text-white hover:bg-[var(--color-accent)] disabled:opacity-70"
         >
           {installing === null && (
             <>

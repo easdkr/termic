@@ -214,7 +214,7 @@ export function TabBar({ ws }: { ws: Workspace }) {
   }
 
   return (
-    <div ref={stripRef} className="termic-tabstrip flex h-9 shrink-0 items-center gap-0 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] pl-2 pr-2 overflow-x-auto overflow-y-hidden">
+    <div ref={stripRef} className="termic-tabstrip flex h-9 shrink-0 items-center gap-0 border-b border-[var(--color-border-soft)] bg-transparent pl-2 pr-2 overflow-x-auto overflow-y-hidden">
       {tabs.map(t => (
         <TabPill
           key={t.id} ws={ws} tab={t} active={t.id === activeId}
@@ -411,8 +411,9 @@ function TabPill({ ws, tab, active, onSelect, onClose, renaming, onStartRename, 
         dragging
           ? "cursor-grabbing !transition-none bg-[var(--color-bg)] text-[var(--color-fg)] shadow-lg"
           : active
-            ? "bg-[var(--color-bg)] text-[var(--color-fg)]"
-            : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+            ? "bg-[var(--color-bg-2)] text-[var(--color-fg)] border border-[var(--color-border)] rounded-md shadow-sm"
+            : "bg-transparent text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] rounded-md",
+        "transition-colors duration-150",
       )}
     >
       {/* Work-state badge moved to the trailing slot — see below. */}

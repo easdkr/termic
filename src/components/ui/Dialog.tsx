@@ -41,7 +41,7 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
           style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
           className={cn(
             "fixed inset-0 z-40 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-            overlayClassName ?? "bg-black/65",
+            overlayClassName ?? "bg-black/40 backdrop-blur-sm",
           )}
         />
         {/* Vertical centering is safe ONLY because Dialog.Content below sets
@@ -54,7 +54,7 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
           <Dialog.Content
             className={cn(
               "relative grid w-full max-w-md gap-2 pointer-events-auto",
-              "rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-1)] p-5 shadow-2xl",
+              "rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-1)]/95 p-5 shadow-2xl shadow-black/50 backdrop-blur-xl",
               // Always cap at viewport height with internal scroll so
               // tall content (multi-repo project create with many
               // members, etc.) never pushes the action buttons below
@@ -89,7 +89,7 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
               <Dialog.Close
                 data-tauri-drag-region="false"
                 style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-                className="absolute right-3 top-3 rounded-md p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)]"
+                className="absolute right-3 top-3 rounded-md p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
               >
                 <X className="h-4 w-4" />
               </Dialog.Close>

@@ -70,7 +70,7 @@ export function ConfirmDialog() {
       // overlay rendered it as just another card on the page.
       className={cn(
         "max-w-xl",
-        isAnotherDialogOpen && "ring-2 ring-[var(--color-warn)]/70 shadow-[0_0_0_8px_rgba(245,197,66,0.12),0_25px_50px_-12px_rgba(0,0,0,0.75)]",
+        isAnotherDialogOpen && "ring-2 ring-[var(--color-warn)]/70 shadow-[0_0_0_8px_color-mix(in_srgb,var(--color-warn)_12%,transparent),0_25px_50px_-12px_rgba(0,0,0,0.75)]",
       )}
       // When stacked, the parent dialog already painted the 65% black
       // backdrop — a second one would double-dim. Use a faint warning

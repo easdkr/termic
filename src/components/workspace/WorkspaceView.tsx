@@ -8,7 +8,7 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import type { Workspace } from "@/lib/types";
 import { useApp, useWorkspaceTabs, useActiveTabId } from "@/store/app";
-import { usePrefs, currentTerminalTheme } from "@/store/prefs";
+import { currentTerminalTheme } from "@/store/prefs";
 import { TabBar } from "./TabBar";
 import { TerminalPane, FooterBar } from "./TerminalPane";
 import { AuxTerminal } from "./AuxTerminal";
@@ -66,10 +66,6 @@ export function WorkspaceView({ ws }: { ws: Workspace }) {
   const closeBottomTab = useApp(s => s.closeBottomTab);
   const setActiveBottom = useApp(s => s.setActiveBottomTab);
 
-  // Subscribe to themeMode so the terminals-area bg recomputes when the
-  // user switches themes — currentTerminalTheme() reads the live store but
-  // doesn't trigger a re-render on its own.
-  usePrefs(s => s.themeMode);
   const xtermBg = currentTerminalTheme().background as string;
 
   useEffect(() => { ensureDefaultTab(ws.id, ws.cli); }, [ws.id, ws.cli, ensureDefaultTab]);

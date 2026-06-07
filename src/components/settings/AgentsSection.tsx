@@ -148,7 +148,7 @@ export function AgentsSection() {
       command: "",
       args: [],
       icon_id: "lucide:terminal",
-      color: "#9aa0a6",
+      color: "var(--color-fg-dim)",
       builtin: false,
       capabilities: { yolo_args: [], runtime_yolo_command: "" },
       sandbox_allowed_paths: [],
@@ -459,9 +459,11 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           {modified && onReset && (
             <button
               onClick={() => {
-                if (confirm(`Reset ${agent.display_name} to ship defaults?\n\nThis overwrites Command, Default args, YOLO args, Runtime YOLO command, and Resume args.`)) {
-                  onReset();
-                }
+                useUI.getState().askConfirm({
+                  title: `Reset ${agent.display_name} to ship defaults?`,
+                  message: "This overwrites Command, Default args, YOLO args, Runtime YOLO command, and Resume args.",
+                  confirmLabel: "Reset",
+                }).then(ok => { if (ok) onReset(); });
               }}
               className="flex items-center gap-1 rounded p-1.5 text-[12px] text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
               title="Reset this agent to ship defaults"

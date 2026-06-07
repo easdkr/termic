@@ -29,11 +29,11 @@ export const Checkbox = forwardRef<HTMLButtonElement, Props>(
       disabled={disabled}
       onClick={(e) => { e.stopPropagation(); onChange?.(!checked); }}
       className={cn(
-        "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] border transition-colors",
+        "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border border-[var(--color-border)] bg-[var(--color-bg-1)]/60 transition-colors duration-150",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-soft)]",
         checked
-          ? "border-[var(--color-accent-deep)] bg-[var(--color-accent-deep)] text-white hover:brightness-110"
-          : "border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-accent-soft)]",
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-white"
+          : "hover:border-[var(--color-accent-soft)]",
         disabled && "opacity-40 cursor-not-allowed",
         className,
       )}
