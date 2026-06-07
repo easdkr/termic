@@ -66,11 +66,36 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
     term.unicode.activeVersion = "11";
     term.open(hostRef.current);
     termRef.current = term;
-    const inputProxy = installTerminalInputProxy(host, term, (text) => {
-      const ptyId = ptyRef.current;
-      if (!ptyId) return;
-      ipc.ptyWrite(ptyId, Array.from(new TextEncoder().encode(text))).catch(() => {});
-    });
+    const inputProxy = installTerminalInputProxy(
+      host,
+      term,
+      (text) => {
+        const ptyId = ptyRef.current;
+        if (!ptyId) return;
+        ipc.ptyWrite(ptyId, Array.from(new TextEncoder().encode(text))).catch(() => {});
+      },
+      {
+        onImagePaste: async (file) => {
+          const ptyId = ptyRef.current;
+          if (!ptyId) return;
+          try {
+            const buf = await file.arrayBuffer();
+            const ext = file.type === "image/png" ? "png"
+              : file.type === "image/jpeg" ? "jpg"
+              : file.type === "image/gif" ? "gif"
+              : file.type === "image/webp" ? "webp"
+              : "png";
+            // Aux shell has no workspace id — use a generic "aux" bucket.
+            const path = await ipc.saveClipboardImage("aux", Array.from(new Uint8Array(buf)), ext);
+            const escaped = path.replace(/[^A-Za-z0-9._/-]/g, "\\$&");
+            ipc.ptyWrite(ptyId, Array.from(new TextEncoder().encode(escaped + " "))).catch(() => {});
+          } catch {
+            // Silently ignore — aux shell is a scratch terminal and the user
+            // can always save the image manually if they need the path.
+          }
+        },
+      },
+    );
     inputProxyRef.current = inputProxy;
     // Hold a ref to the WebGL addon so the cleanup path can dispose it BEFORE
     // term.dispose(). Without that, the addon's pending render frame fires
