@@ -666,6 +666,39 @@ pub struct SpawnResult {
     sandbox: SandboxStatus,
 }
 
+fn is_utf8_locale(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    upper.contains("UTF-8") || upper.contains("UTF8")
+}
+
+fn utf8_locale_defaults(
+    parent_env: &HashMap<String, String>,
+    spawn_env: &HashMap<String, String>,
+) -> Vec<(&'static str, String)> {
+    if spawn_env.contains_key("LC_ALL") || parent_env.contains_key("LC_ALL") {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let lang = spawn_env
+        .get("LANG")
+        .or_else(|| parent_env.get("LANG"))
+        .filter(|v| is_utf8_locale(v))
+        .cloned()
+        .unwrap_or_else(|| "en_US.UTF-8".into());
+
+    if !spawn_env.contains_key("LANG") && !parent_env.contains_key("LANG") {
+        out.push(("LANG", lang.clone()));
+    }
+    if !spawn_env.contains_key("LC_CTYPE") {
+        match parent_env.get("LC_CTYPE") {
+            Some(v) if is_utf8_locale(v) => {}
+            _ => out.push(("LC_CTYPE", lang)),
+        }
+    }
+    out
+}
+
 #[derive(Deserialize)]
 pub struct SpawnArgs {
     pub cwd: String,
@@ -923,7 +956,8 @@ fn pty_spawn(
     // Inherit ALL parent env first — agents need ANTHROPIC_API_KEY,
     // GEMINI_API_KEY, OPENAI_API_KEY, HTTPS_PROXY, etc. The user's per-spawn
     // `env` overlay then takes precedence for known keys like TERMIC_*.
-    for (k, v) in std::env::vars() {
+    let parent_env: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in &parent_env {
         cmd.env(k, v);
     }
     // Override the inherited PATH with the login-shell-resolved one.
@@ -932,6 +966,12 @@ fn pty_spawn(
     // ~/.bun/bin, /opt/homebrew/bin, or under nvm aren't found. See
     // shell_env.rs.
     cmd.env("PATH", shell_env::resolved_path());
+    // GUI-launched macOS apps often have no LANG/LC_CTYPE. The byte path is
+    // already UTF-8, but shells/readline need a UTF-8 locale to edit Korean
+    // and other multibyte input correctly inside the PTY.
+    for (k, v) in utf8_locale_defaults(&parent_env, &args.env) {
+        cmd.env(k, v);
+    }
     for (k, v) in &args.env {
         cmd.env(k, v);
     }
@@ -7628,6 +7668,48 @@ mod tests {
         assert!(s.contains("secrets.env"));
         assert!(s.contains("/y"));
         assert!(!s.contains("/x"));
+    }
+
+    #[test]
+    fn utf8_locale_defaults_fill_missing_gui_locale() {
+        let parent = HashMap::new();
+        let spawn = HashMap::new();
+        let defaults = utf8_locale_defaults(&parent, &spawn);
+        assert_eq!(
+            defaults,
+            vec![
+                ("LANG", "en_US.UTF-8".into()),
+                ("LC_CTYPE", "en_US.UTF-8".into()),
+            ],
+        );
+    }
+
+    #[test]
+    fn utf8_locale_defaults_preserve_existing_utf8_locale() {
+        let mut parent = HashMap::new();
+        parent.insert("LANG".into(), "ko_KR.UTF-8".into());
+        parent.insert("LC_CTYPE".into(), "ko_KR.UTF-8".into());
+        let spawn = HashMap::new();
+        assert!(utf8_locale_defaults(&parent, &spawn).is_empty());
+    }
+
+    #[test]
+    fn utf8_locale_defaults_do_not_override_spawn_locale() {
+        let parent = HashMap::new();
+        let mut spawn = HashMap::new();
+        spawn.insert("LC_ALL".into(), "C".into());
+        assert!(utf8_locale_defaults(&parent, &spawn).is_empty());
+    }
+
+    #[test]
+    fn utf8_locale_defaults_fix_non_utf8_character_classification() {
+        let mut parent = HashMap::new();
+        parent.insert("LANG".into(), "C".into());
+        let spawn = HashMap::new();
+        assert_eq!(
+            utf8_locale_defaults(&parent, &spawn),
+            vec![("LC_CTYPE", "en_US.UTF-8".into())],
+        );
     }
 
     // ──────────────── spotlight git mechanics ────────────────

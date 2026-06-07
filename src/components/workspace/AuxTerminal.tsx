@@ -14,6 +14,7 @@ import { ImageAddon } from "@xterm/addon-image";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { loadTerminalRenderer } from "@/lib/terminalRenderer";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
+import { installTerminalInputProxy } from "@/lib/terminalIme";
 import * as ipc from "@/lib/ipc";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg } from "@/store/prefs";
 
@@ -26,6 +27,7 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
   const termRef = useRef<Terminal | null>(null);
   const fitRef  = useRef<FitAddon | null>(null);
   const ptyRef  = useRef<string | null>(null);
+  const inputProxyRef = useRef<{ focus: () => void } | null>(null);
   // Bumped on user "new shell" click — included in the spawn effect's deps so
   // the cleanup runs (disposes the dead xterm) and the body re-runs (spawns
   // a fresh PTY + xterm).
@@ -46,6 +48,7 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
 
     const term = new Terminal({
       cursorBlink: true,
+      cursorInactiveStyle: "block",
       fontFamily: currentTerminalStack(),
       fontSize: usePrefs.getState().terminalFontSize,
       // Regular 400 / bold 700 — the static JetBrains Mono masters. See
@@ -67,6 +70,12 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
     term.unicode.activeVersion = "11";
     term.open(hostRef.current);
     termRef.current = term;
+    const inputProxy = installTerminalInputProxy(host, term, (text) => {
+      const ptyId = ptyRef.current;
+      if (!ptyId) return;
+      ipc.ptyWrite(ptyId, Array.from(new TextEncoder().encode(text))).catch(() => {});
+    });
+    inputProxyRef.current = inputProxy;
     // Hold a ref to the WebGL addon so the cleanup path can dispose it BEFORE
     // term.dispose(). Without that, the addon's pending render frame fires
     // after term._core._store is nulled and crashes with
@@ -132,6 +141,8 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
       cancelled = true;
       ro.disconnect();
       unregisterDrop();
+      inputProxy.dispose();
+      if (inputProxyRef.current === inputProxy) inputProxyRef.current = null;
       unlistenData?.(); unlistenExit?.();
       if (ptyRef.current) ipc.ptyKill(ptyRef.current).catch(() => {});
       // Dispose the renderer addon FIRST so its render loop can't fire
@@ -160,7 +171,10 @@ export function AuxTerminal({ wsPath, active, onExited }: { wsPath: string; acti
     // the main agent terminal on workspace switch. Stealing it here meant
     // typing immediately after switching workspaces went into the scratch
     // shell instead of the agent.
-    if (active) requestAnimationFrame(() => { try { fitRef.current?.fit(); } catch {} });
+    if (active) requestAnimationFrame(() => {
+      try { fitRef.current?.fit(); } catch {}
+      inputProxyRef.current?.focus();
+    });
   }, [active]);
 
   // Re-apply font / size when prefs change.

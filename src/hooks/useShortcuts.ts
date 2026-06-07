@@ -24,10 +24,12 @@ import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
 import { requestCloseTab } from "@/lib/closeTab";
 import { bindingMatches, SHORTCUT_DEFS, type ShortcutId } from "@/lib/shortcuts";
+import { isImeKeyboardEvent } from "@/lib/terminalIme";
 
 export function useShortcuts() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (isImeKeyboardEvent(e)) return;
       const binds = usePrefs.getState().shortcuts;
       // First binding (in registry order) whose combo the event satisfies.
       // Exact modifier matching makes commands mutually exclusive unless the
@@ -139,7 +141,8 @@ export function useShortcuts() {
         case "focus-terminal": {
           if (!wsId || isTyping) return;
           e.preventDefault();
-          const el = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+          const host = activeTabId ? document.querySelector(`[data-tab-id="${CSS.escape(activeTabId)}"]`) : null;
+          const el = host?.querySelector(".termic-terminal-input, .xterm-helper-textarea") as HTMLTextAreaElement | null;
           el?.focus();
           return;
         }
@@ -227,7 +230,7 @@ export function useShortcuts() {
           // its xterm helper-textarea is in the DOM.
           const tryFocus = (tries = 20) => {
             const split = document.querySelector("[data-bottom-split]");
-            const active = split?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+            const active = split?.querySelector(".termic-terminal-input, .xterm-helper-textarea") as HTMLTextAreaElement | null;
             if (active) { active.focus(); return; }
             if (tries > 0) setTimeout(() => tryFocus(tries - 1), 25);
           };
