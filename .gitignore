@@ -102,6 +102,7 @@ $RECYCLE.BIN/
 # ── ai assistant scratch / local notes ────────────────────────────────
 .claude/
 .antigravitycli/
+.omo/
 .cursorrules.local
 NOTES.local.md
 TODO.local.md
