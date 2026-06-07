@@ -165,7 +165,7 @@ export function PrCreateDialog() {
   // pattern the Checks tab uses for the same probe.
   const ghUnavailable = githubStatus !== null && !githubStatus.available;
   const ghUnauth = githubStatus !== null && githubStatus.available && !githubStatus.authenticated;
-  const canCreate = !!ws && !!project && !ghUnavailable && !ghUnauth;
+  const canCreate = !!ws && !!project && title.trim().length > 0 && !ghUnavailable && !ghUnauth;
 
   const submitting = submit.kind === "loading";
   const isOk = submit.kind === "ok";
@@ -340,6 +340,30 @@ export function PrCreateDialog() {
                 <div className="mt-1 text-[11.5px] text-[var(--color-fg-faint)]">
                   Run <code className="font-mono">gh auth login</code> in a terminal to authenticate.
                 </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Pre-flight gate messages — shown when the button is
+            disabled so the user knows WHY they can't click it.
+            Without this, the disabled button looks like a bug
+            ("I filled everything, why is it still grey?"). */}
+        {!isOk && (ghUnavailable || ghUnauth) && (
+          <div className="flex items-start gap-2 rounded-md border border-[var(--color-warn)]/40 bg-[var(--color-warn)]/10 px-3 py-2 text-[12.5px] text-[var(--color-warn)]">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              {ghUnavailable ? (
+                <>
+                  <span className="font-medium">GitHub CLI not found.</span>{" "}
+                  Install <code className="font-mono">gh</code> (e.g.{" "}
+                  <code className="font-mono">brew install gh</code>) and authenticate to create PRs.
+                </>
+              ) : (
+                <>
+                  <span className="font-medium">GitHub CLI not authenticated.</span>{" "}
+                  Run <code className="font-mono">gh auth login</code> in a terminal, then try again.
+                </>
               )}
             </div>
           </div>

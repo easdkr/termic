@@ -5968,8 +5968,8 @@ fn gh_command() -> Command {
 ///     github.com
 ///       ✓ Logged in to github.com as octocat (/Users/x/.config/gh/hosts.yml)
 ///
-/// Username extraction uses the "as <name>" pattern, which has been
-/// stable across gh versions. Case-insensitive on "Logged in" / "as" /
+/// Username extraction handles both older "as <name>" output and newer
+/// "account <name>" output. Case-insensitive on "Logged in" / markers /
 /// "github.com" to tolerate minor stylistic drift in future versions.
 fn parse_gh_auth_output(stdout: &str) -> Option<String> {
     let lower = stdout.to_lowercase();
@@ -5977,10 +5977,12 @@ fn parse_gh_auth_output(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let l = line.trim();
         if l.is_empty() { continue; }
-        if !l.to_lowercase().contains("logged in") { continue; }
-        if !l.to_lowercase().contains("github.com") { continue; }
-        if let Some(idx) = l.to_lowercase().find(" as ") {
-            let after = &l[idx + 4..];
+        let line_lower = l.to_lowercase();
+        if !line_lower.contains("logged in") { continue; }
+        if !line_lower.contains("github.com") { continue; }
+        for marker in [" as ", " account "] {
+            let Some(idx) = line_lower.find(marker) else { continue; };
+            let after = &l[idx + marker.len()..];
             let name: String = after
                 .chars()
                 .take_while(|c| !c.is_whitespace())
@@ -6002,32 +6004,47 @@ fn gh_probe_auth() -> (bool, Option<String>) {
     let out = gh_command().args(["auth", "status"]).output();
     let out = match out {
         Ok(o) => o,
-        Err(_) => return (false, None),
+        Err(e) => {
+            dlog(&format!("[gh_probe_auth] command failed: {e}"));
+            return (false, None);
+        }
     };
     let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
     combined.push('\n');
     combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    dlog(&format!("[gh_probe_auth] exit={} combined={combined:?}", out.status.code().unwrap_or(-1)));
     if !out.status.success() {
         // Some gh versions exit 1 even when auth succeeded but a
         // secondary check (token scopes, protocol) failed. If we can
         // still parse a username, trust it.
         if let Some(u) = parse_gh_auth_output(&combined) {
+            dlog(&format!("[gh_probe_auth] parsed user despite non-zero exit: {u}"));
             return (true, Some(u));
         }
+        dlog("[gh_probe_auth] non-zero exit and no user parsed");
         return (false, None);
     }
     match parse_gh_auth_output(&combined) {
-        Some(u) => (true, Some(u)),
-        None => (false, None),
+        Some(u) => {
+            dlog(&format!("[gh_probe_auth] parsed user: {u}"));
+            (true, Some(u))
+        }
+        None => {
+            dlog("[gh_probe_auth] zero exit but no user parsed");
+            (false, None)
+        }
     }
 }
 
 fn github_status_blocking() -> GithubStatus {
     let path = gh_resolve_path();
+    dlog(&format!("[github_status_blocking] path='{path}'"));
     if path.is_empty() {
+        dlog("[github_status_blocking] gh not found, returning default");
         return GithubStatus { available: false, authenticated: false, username: None };
     }
     let (authenticated, username) = gh_probe_auth();
+    dlog(&format!("[github_status_blocking] auth={authenticated} user={username:?}"));
     GithubStatus { available: true, authenticated, username }
 }
 
@@ -6039,9 +6056,16 @@ fn github_status_blocking() -> GithubStatus {
 /// this is non-blocking at startup.
 #[tauri::command]
 async fn github_status() -> GithubStatus {
-    tauri::async_runtime::spawn_blocking(github_status_blocking)
-        .await
-        .unwrap_or_default()
+    match tauri::async_runtime::spawn_blocking(github_status_blocking).await {
+        Ok(status) => {
+            dlog(&format!("[github_status] ok: available={} authenticated={} username={:?}", status.available, status.authenticated, status.username));
+            status
+        }
+        Err(e) => {
+            dlog(&format!("[github_status] spawn_blocking failed: {e}"));
+            GithubStatus::default()
+        }
+    }
 }
 
 // ───────────────────────────── gh PR + checks fetch ─────────────────────────────
@@ -7821,6 +7845,18 @@ mod tests {
             utf8_locale_defaults(&parent, &spawn),
             vec![("LC_CTYPE", "en_US.UTF-8".into())],
         );
+    }
+
+    #[test]
+    fn gh_auth_parser_accepts_as_username_output() {
+        let out = "github.com\n  ✓ Logged in to github.com as octocat (/Users/x/.config/gh/hosts.yml)\n";
+        assert_eq!(parse_gh_auth_output(out), Some("octocat".into()));
+    }
+
+    #[test]
+    fn gh_auth_parser_accepts_account_username_output() {
+        let out = "github.com\n  ✓ Logged in to github.com account easdkr (keyring)\n";
+        assert_eq!(parse_gh_auth_output(out), Some("easdkr".into()));
     }
 
     // ──────────────── spotlight git mechanics ────────────────
