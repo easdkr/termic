@@ -530,6 +530,15 @@ export interface PullRequestWithChecks {
   checks: GitHubCheckRun[];
 }
 
+/** One row from `gh issue list --json`. Returned by
+ *  `github_issue_list` so the dialog can show a pick-list. */
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  url: string;
+  body: string | null;
+}
+
 /** Input shape for "seed a workspace from an issue". Filled in by
  *  the issue-import dialog; persisted on the workspace as the
  *  breadcrumb the agent reads on first spawn. */

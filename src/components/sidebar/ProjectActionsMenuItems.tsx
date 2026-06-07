@@ -155,9 +155,9 @@ export function ProjectActionsMenuItems({ projectId, onPickRepoCli }: {
               <path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.22.83 1.22.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.62 7.62 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z" />
             </svg>
             <div className="flex min-w-0 flex-col">
-              <span className="truncate">From issue URL</span>
+              <span className="truncate">From GitHub issue</span>
               <span className="text-[11.5px] text-[var(--color-fg-faint)]">
-                Paste a GitHub issue to seed the workspace
+                Pick an open issue to seed the workspace
               </span>
             </div>
           </DropdownItem>

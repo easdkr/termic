@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig, GitHubStatus,
-  PullRequestWithChecks, IssueSeed, GitHubPullRequest,
+  PullRequestWithChecks, IssueSeed, GitHubPullRequest, GitHubIssue,
 } from "./types";
 
 // ───────────────────────────── projects ─────────────────────────────
@@ -384,6 +384,15 @@ export const githubPrChecksFetch = (projectId: string, branch: string) =>
  *  uncached repo can take a few hundred ms. */
 export const githubIssueFetch = (url: string) =>
   invoke<IssueSeed>("github_issue_fetch", { url });
+
+/** List open issues for a project's repo via `gh issue list`.
+ *  Returns up to 50 open issues. The dialog uses this to show a
+ *  pick-list instead of requiring the user to paste a URL.
+ *  Errors carry the same stable code prefixes as the rest of the
+ *  `gh` surface (`gh_unavailable:` / `gh_unauthenticated:` /
+ *  `rate_limited:` / `gh_error:`). */
+export const githubIssueList = (projectId: string) =>
+  invoke<GitHubIssue[]>("github_issue_list", { projectId });
 
 /** Fetch a Linear issue's title + body for the issue-import dialog.
  *  Task 15 of the termic-vs-conductor plan. The dialog pre-detects

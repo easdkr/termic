@@ -313,6 +313,17 @@ pub struct ExternalDirLink {
     pub target_path: String,
 }
 
+/// One row in a GitHub issue list. Returned by `gh issue list --json`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubIssue {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// Null when the issue body is empty.
+    pub body: Option<String>,
+}
+
 /// One row in a PR's "Checks" panel. Mirrors the `check_runs[]`
 /// payload returned by GitHub's REST API (subset of fields we
 /// actually surface in the UI).
@@ -6550,6 +6561,96 @@ async fn github_issue_fetch(url: String) -> Result<IssueSeed, String> {
         .map_err(|e| e.to_string())?
 }
 
+// ───────────────────────────── gh issue list ─────────────────────────────
+//
+// List open issues for a project's repo via `gh issue list`. The
+// dialog uses this to show a pick-list instead of requiring the user
+// to paste a URL.
+
+/// Blocking implementation: discover owner/repo from the project's
+/// cwd, then run `gh issue list --json number,title,url,body`.
+fn github_issue_list_blocking(project_id: String) -> Result<Vec<GitHubIssue>, String> {
+    let projects = load_projects();
+    let project = projects
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+
+    // Discover owner/repo via `gh repo view`.
+    let repo_out = gh_command()
+        .args(["repo", "view", "--json", "nameWithOwner"])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh repo view: {}", e))?;
+    let repo_stderr = String::from_utf8_lossy(&repo_out.stderr).into_owned();
+    if !repo_out.status.success() {
+        return Err(classify_gh_error(&repo_out.status, &repo_stderr).to_string());
+    }
+    let repo_stdout = String::from_utf8_lossy(&repo_out.stdout);
+    let repo_json: serde_json::Value = serde_json::from_str(&repo_stdout)
+        .map_err(|e| format!("gh_error: parse gh repo view: {} (raw: {})", e, repo_stdout))?;
+    let owner_repo = repo_json
+        .get("nameWithOwner")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            format!(
+                "gh_error: gh repo view JSON missing nameWithOwner (raw: {})",
+                repo_stdout
+            )
+        })?
+        .to_string();
+
+    // Run `gh issue list`.
+    let out = gh_command()
+        .args([
+            "issue", "list",
+            "--repo", &owner_repo,
+            "--state", "open",
+            "--limit", "50",
+            "--json", "number,title,url,body",
+        ])
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh issue list: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    #[derive(Deserialize)]
+    struct GhIssueListDto {
+        number: u64,
+        title: String,
+        url: String,
+        body: Option<String>,
+    }
+    let dtos: Vec<GhIssueListDto> = serde_json::from_str(&stdout)
+        .map_err(|e| format!("gh_error: parse gh issue list: {} (raw: {})", e, stdout))?;
+    Ok(dtos
+        .into_iter()
+        .map(|d| GitHubIssue {
+            number: d.number,
+            title: d.title,
+            url: d.url,
+            body: d.body.filter(|s| !s.is_empty()),
+        })
+        .collect())
+}
+
+/// IPC entry: list open issues for a project's repo.
+#[tauri::command]
+async fn github_issue_list(project_id: String) -> Result<Vec<GitHubIssue>, String> {
+    tauri::async_runtime::spawn_blocking(move || github_issue_list_blocking(project_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ───────────────────────────── Linear issue fetch (Task 15) ─────────────────────────────
 //
 // Task 15 of the termic-vs-conductor plan. The dialog pre-detects
@@ -7470,7 +7571,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file, save_clipboard_image,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, linear_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, github_issue_list, linear_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
