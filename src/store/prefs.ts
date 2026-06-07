@@ -28,122 +28,36 @@ const LS_TERMINAL_SCROLLBACK   = "terminalScrollback";
 const LS_WS_EXPAND_MODE = "workspaceExpandMode";
 const LS_SHORTCUTS     = "shortcutBindings";
 
-export type ThemeMode = "auto" | "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix";
-/** What `applyTheme` resolves to: a concrete palette name. `auto` is
- *  never returned; it gets mapped to light/dark based on OS preference. */
-export type ResolvedTheme = "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix";
+// Linear is the only theme. Legacy themes (claude, dark, light, etc.) were
+// removed to keep the UI consistent. The theme system is kept as a minimal
+// stub so existing localStorage values don't crash on load.
+export type ThemeMode = "linear";
+export type ResolvedTheme = "linear";
 
-const VALID_MODES: ReadonlyArray<ThemeMode> = ["auto", "light", "dark", "claude", "solarized", "cobalt", "matrix"];
-/** Defensive parse: localStorage may hold a theme id that's been
- *  removed in a later version. Fall back to "claude" (the default
- *  theme) instead of letting the unknown string flow through and
- *  silently land on the @theme default. NOTE: this also migrates the
- *  old "vscode" id for free — that theme was renamed to "claude", and
- *  any stale "vscode" string lands here and resolves to it. */
 function parseThemeMode(raw: string): ThemeMode {
-  return (VALID_MODES as readonly string[]).includes(raw) ? (raw as ThemeMode) : "claude";
+  return "linear";
 }
 
-/** xterm theme objects keyed by resolved palette. Each must define enough
- *  of xterm's ITheme that the terminal looks at home in the surrounding
- *  chrome. ANSI 16 colors stay close to the parent palette's family so a
- *  `ls --color` looks consistent with the app's surface colors. */
-export const TERMINAL_THEMES: Record<ResolvedTheme, Record<string, string>> = {
-  dark: {
-    background: "#0b0b0d",
-    foreground: "#eceef1",
-    cursor: "#d97757",
-    cursorAccent: "#0b0b0d",
-    selectionBackground: "rgba(51,117,240,0.75)",
-    black: "#1a1a1d", red: "#ef5350", green: "#4caf50", yellow: "#f0b13a",
-    blue: "#4c8bf5", magenta: "#c084fc", cyan: "#22d3ee", white: "#eceef1",
-    brightBlack: "#6e747e", brightRed: "#ff6b66", brightGreen: "#7cd57e", brightYellow: "#ffd166",
-    brightBlue: "#7fb1ff", brightMagenta: "#d7a4ff", brightCyan: "#67e8f9", brightWhite: "#ffffff",
-  },
-  claude: {
-    // "Claude" — terax-ai's warm-charcoal palette (formerly id "vscode").
-    background: "#1f1e1d",
-    foreground: "#f5f4ee",
-    cursor: "#d97757",
-    cursorAccent: "#1f1e1d",
-    selectionBackground: "rgba(51,117,240,0.75)",
-    black: "#1a1918", red: "#ef5350", green: "#4caf50", yellow: "#f0b13a",
-    blue: "#4c8bf5", magenta: "#c084fc", cyan: "#22d3ee", white: "#f5f4ee",
-    brightBlack: "#6e747e", brightRed: "#ff6b66", brightGreen: "#7cd57e", brightYellow: "#ffd166",
-    brightBlue: "#7fb1ff", brightMagenta: "#d7a4ff", brightCyan: "#67e8f9", brightWhite: "#ffffff",
-  },
-  light: {
-    background: "#faf9f6",
-    foreground: "#1c1b1a",
-    cursor: "#c25e3d",
-    cursorAccent: "#faf9f6",
-    selectionBackground: "rgba(51,117,240,0.40)",
-    black: "#2b2926", red: "#b3322a", green: "#3f8a3f", yellow: "#a17415",
-    blue: "#2c5fb3", magenta: "#7a3aa5", cyan: "#1c7c8e", white: "#3f3d3a",
-    brightBlack: "#55534f", brightRed: "#d9453d", brightGreen: "#52a352", brightYellow: "#b88a26",
-    brightBlue: "#3a7bd9", brightMagenta: "#9358c2", brightCyan: "#1f97ad", brightWhite: "#1c1b1a",
-  },
-  solarized: {
-    // Solarized Dark canonical ANSI mapping (Ethan Schoonover).
-    background: "#002b36",       // base03
-    foreground: "#93a1a1",       // base1
-    cursor: "#cb4b16",           // orange (canonical solarized cursor)
-    cursorAccent: "#002b36",
-    selectionBackground: "rgba(30,138,204,0.75)",
-    black:   "#073642", red:     "#dc322f", green:   "#859900", yellow:  "#b58900",
-    blue:    "#268bd2", magenta: "#d33682", cyan:    "#2aa198", white:   "#eee8d5",
-    brightBlack:   "#586e75", brightRed:     "#cb4b16", brightGreen:   "#586e75", brightYellow:  "#657b83",
-    brightBlue:    "#839496", brightMagenta: "#6c71c4", brightCyan:    "#93a1a1", brightWhite:   "#fdf6e3",
-  },
-  cobalt: {
-    // Wes Bos / iTerm "Cobalt 2". Deep navy + bright accents; the
-    // signature yellow cursor on dark blue is what makes it Cobalt.
-    background: "#193549",
-    foreground: "#e1efff",
-    cursor: "#ffc600",
-    cursorAccent: "#193549",
-    selectionBackground: "rgba(255,198,0,0.45)",
-    black: "#234a6a", red:     "#ff628c", green:   "#3ad900", yellow:  "#ffc600",
-    blue:  "#9effff", magenta: "#fb94ff", cyan:    "#80ffbb", white:   "#e1efff",
-    brightBlack: "#5a91b1", brightRed:     "#ff7da3", brightGreen:   "#5eea2e", brightYellow:  "#ffd54a",
-    brightBlue:  "#b3ffff", brightMagenta: "#ffaaff", brightCyan:    "#a4ffd4", brightWhite:   "#ffffff",
-  },
-  matrix: {
-    // Calmer Matrix - green where it matters (the agent's text + cursor)
-    // but ANSI 16 keeps full contrast so git log / diffs stay readable.
-    // The chrome (CSS vars) uses warm off-white gray; this terminal
-    // palette is what the agent actually paints, kept slightly greener
-    // for the CRT vibe without going full neon.
-    background: "#050905",
-    foreground: "#c8e1c0",
-    cursor: "#3fb950",
-    cursorAccent: "#050905",
-    selectionBackground: "rgba(63,185,80,0.45)",
-    black:   "#0d130d", red:     "#e07070", green:   "#3fb950", yellow:  "#d4c750",
-    blue:    "#5a9fd6", magenta: "#c075c0", cyan:    "#50b0a8", white:   "#c8e1c0",
-    brightBlack:   "#5a6058", brightRed:     "#e88a8a", brightGreen:   "#5fd06e", brightYellow:  "#e0d670",
-    brightBlue:    "#7eb5e6", brightMagenta: "#d090d0", brightCyan:    "#70c8c0", brightWhite:   "#e8f0e0",
-  },
+/** Static Linear xterm theme — no switching, no lookup table. */
+const LINEAR_TERMINAL_THEME: Record<string, string> = {
+  background: "#0E0E10",
+  foreground: "#F0F0F5",
+  cursor: "#5E6AD2",
+  cursorAccent: "#0E0E10",
+  selectionBackground: "rgba(94,106,210,0.45)",
+  black: "#1a1a1f", red: "#ef5350", green: "#4caf50", yellow: "#f0b13a",
+  blue: "#5E6AD2", magenta: "#a78bfa", cyan: "#22d3ee", white: "#eceef1",
+  brightBlack: "#6e6e7a", brightRed: "#ff6b66", brightGreen: "#7cd57e", brightYellow: "#ffd166",
+  brightBlue: "#8b98ff", brightMagenta: "#d7a4ff", brightCyan: "#67e8f9", brightWhite: "#ffffff",
 };
 
-/** Resolve the user's chosen theme to a concrete palette name. Used by
- *  both `applyTheme` (to pick which html class to toggle) and the
- *  terminal panes (to pick the matching xterm theme). */
 export function currentTerminalTheme(): Record<string, string> {
-  const resolved = resolveThemeFull(usePrefs.getState().themeMode);
-  return TERMINAL_THEMES[resolved];
+  return LINEAR_TERMINAL_THEME;
 }
 
-/** COLORFGBG is the long-standing convention agents (claude / kimi /
- *  opencode / codex) use to pick their TUI theme without a manual flag. Format is
- *  `fg;bg` where each is an ANSI color number; tools just check whether
- *  the bg value is "light" (1-6, 7, 15) or "dark" (0, 8, 16+). We emit
- *  conservative values - `0;15` (black on white) for light, `15;0`
- *  (white on black) for any dark-family palette. Set this on every
- *  PTY spawn alongside TERMIC_PORT etc. */
+/** COLORFGBG — always dark-family since Linear is dark-only. */
 export function currentColorFgBg(): string {
-  const resolved = resolveThemeFull(usePrefs.getState().themeMode);
-  return resolved === "light" ? "0;15" : "15;0";
+  return "15;0";
 }
 
 // Curated list of monospace fonts we probe for. JetBrains Mono ships
@@ -283,7 +197,7 @@ interface PrefsState {
    *  the agent's own permission prompts are just friction. Users who
    *  still want the agent to ask inside a sandbox can turn this off. */
   sandboxBypassPermissions: boolean;
-  /** Color scheme: explicit dark/light, or auto = follow system. */
+  /** Kept for backward compat; always "linear". */
   themeMode: ThemeMode;
   /** Font for the CodeMirror editor + diff viewer. */
   editorFontId: string;
@@ -330,12 +244,9 @@ interface PrefsState {
   setEditorFontSize:  (px: number) => void;
   setCodeLigatures:   (v: boolean) => void;
   /** Restore every Appearance-section pref (fonts, sizes, weight,
-   *  letter-spacing, ligatures) to `APPEARANCE_DEFAULTS`. Theme is
-   *  left alone — it's not part of the Appearance page. */
+   *  letter-spacing, ligatures) to `APPEARANCE_DEFAULTS`. */
   resetAppearance:    () => void;
   setThemeMode:       (m: ThemeMode) => void;
-  /** Convenience: cycle auto → light → dark → auto. */
-  cycleThemeMode:     () => void;
   setYoloMode:        (v: boolean) => void;
   setDesktopNotifications: (v: boolean) => void;
   setSettledHighlight: (v: boolean) => void;
@@ -409,7 +320,7 @@ const initialTerminalLetterSpacing = Math.max(0, Math.round(lsGetNum(LS_TERMINAL
 const initialTerminalScrollback    = Math.max(1000, Math.min(100000, Math.round(lsGetNum(LS_TERMINAL_SCROLLBACK, APPEARANCE_DEFAULTS.terminalScrollback))));
 const initialEditorSize   = lsGetNum(LS_EDITOR_SIZE, APPEARANCE_DEFAULTS.editorFontSize);
 const initialLigatures    = lsGetBool(LS_LIGATURES, APPEARANCE_DEFAULTS.codeLigatures);
-const initialTheme        = parseThemeMode(lsGet(LS_THEME, "claude"));
+const initialTheme        = parseThemeMode(lsGet(LS_THEME, "linear"));
 const initialYolo         = lsGetBool(LS_YOLO, false);
 const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
 // WIP feature - the "agent has settled" heuristic produces false
@@ -500,10 +411,9 @@ export const usePrefs = create<PrefsState>(set => ({
     s.setEditorFontSize(d.editorFontSize);
     s.setCodeLigatures(d.codeLigatures);
   },
-  setThemeMode: (m) => {
-    try { localStorage.setItem(LS_THEME, m); } catch {}
-    applyTheme(m);
-    set({ themeMode: m });
+  setThemeMode: (_m) => {
+    // Theme switching removed — Linear only.
+    set({ themeMode: "linear" });
   },
   setYoloMode: (v) => {
     try { localStorage.setItem(LS_YOLO, v ? "1" : "0"); } catch {}
@@ -544,63 +454,27 @@ export const usePrefs = create<PrefsState>(set => ({
     persistShortcuts(next);
     set({ shortcuts: next });
   },
-  cycleThemeMode: () => {
-    // Cycle only the original three for the keyboard shortcut - explicit
-    // espresso/solarized picks live in the dropdown. Cycling through 5
-    // states blindly with a single button feels random.
-    const order: ThemeMode[] = ["auto", "light", "dark"];
-    const cur = usePrefs.getState().themeMode;
-    const next = order[(order.indexOf(cur) + 1) % order.length];
-    try { localStorage.setItem(LS_THEME, next); } catch {}
-    applyTheme(next);
-    set({ themeMode: next });
-  },
 }));
 
-/** Legacy resolver kept for callers that only care about light-vs-dark
- *  (toolbar icon swap, system colorScheme hint). Espresso + Solarized
- *  both collapse to "dark" for those binary purposes. */
-export function resolveTheme(mode: ThemeMode): "light" | "dark" {
-  const full = resolveThemeFull(mode);
-  return full === "light" ? "light" : "dark";
+/** No-op: Linear is the only theme. Kept for API compat. */
+export function resolveTheme(_mode: ThemeMode): "dark" {
+  return "dark";
 }
 
-/** Resolve to the concrete palette name (light / dark / espresso /
- *  solarized). `auto` only ever maps to light or dark - the OS doesn't
- *  speak espresso/solarized; those require an explicit user pick. */
-export function resolveThemeFull(mode: ThemeMode): ResolvedTheme {
-  if (mode === "auto") {
-    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  }
-  return mode;
+/** No-op: Linear is the only theme. Kept for API compat. */
+export function resolveThemeFull(_mode: ThemeMode): ResolvedTheme {
+  return "linear";
 }
 
-/** Set the html element's class so the CSS palette swap kicks in.
- *  We toggle ALL palette classes so a stale class from a previous
- *  theme can't bleed through after a switch. */
-export function applyTheme(mode: ThemeMode) {
-  const resolved = resolveThemeFull(mode);
+/** Apply the Linear theme class. Legacy multi-theme switching removed. */
+export function applyTheme(_mode: ThemeMode) {
   const html = document.documentElement;
-  html.classList.toggle("light",     resolved === "light");
-  html.classList.toggle("dark",      resolved === "dark");
-  html.classList.toggle("claude",    resolved === "claude");
-  html.classList.toggle("solarized", resolved === "solarized");
-  html.classList.toggle("cobalt",    resolved === "cobalt");
-  html.classList.toggle("matrix",    resolved === "matrix");
-  // Color-scheme tells the browser to use light/dark form controls +
-  // scrollbars. Espresso + Solarized both want dark widgets.
-  html.style.colorScheme = resolved === "light" ? "light" : "dark";
+  html.classList.add("linear");
+  html.style.colorScheme = "dark";
 }
 
-// Apply at module load so the first paint matches the user's preference.
+// Apply at module load so the first paint uses Linear.
 applyTheme(initialTheme);
-
-// Live-track system-theme changes when in auto mode.
-if (typeof window !== "undefined" && window.matchMedia) {
-  window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
-    if (usePrefs.getState().themeMode === "auto") applyTheme("auto");
-  });
-}
 
 /** Editor font drives the --font-mono CSS var so any `font-mono` class +
  *  CodeMirror picks it up via `var(--font-mono)`. */

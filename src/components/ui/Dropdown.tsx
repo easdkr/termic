@@ -38,7 +38,7 @@ export function DropdownMenu({ children, align = "end", sideOffset = 4, classNam
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
         className={cn(
-          "z-50 min-w-[160px] overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-bg-1)] p-1 shadow-xl",
+          "z-50 min-w-[160px] overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-bg-1)]/95 p-1 shadow-xl backdrop-blur-xl",
           "data-[state=open]:animate-in data-[state=open]:fade-in-0",
           className,
         )}
@@ -59,7 +59,7 @@ export function DropdownItem({ children, className, onSelect, disabled }: {
         // (title + subtitle), centering the icon vertically against the
         // whole block makes it float between the two lines. Top-align lets
         // it sit next to the title where the eye expects it.
-        "flex cursor-pointer items-start gap-2 rounded-sm px-2 py-1.5 text-[14px] text-[var(--color-fg)]",
+        "flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-[14px] text-[var(--color-fg)]",
         "outline-none data-[highlighted]:bg-[var(--color-hover)] data-[disabled]:opacity-40 data-[disabled]:cursor-not-allowed",
         // Nudge leading icons down to sit at the title's optical center
         // (lucide icons are top-heavy at small sizes).

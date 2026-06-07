@@ -219,7 +219,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
   const asideRef = useRef<HTMLElement>(null);
 
   return (
-    <aside ref={asideRef} className="relative flex h-full flex-col overflow-hidden border-r border-[var(--color-border-soft)] bg-[var(--color-bg-1)]">
+    <aside ref={asideRef} className="relative flex h-full flex-col overflow-hidden border-r border-[var(--color-border-soft)] bg-[var(--color-bg-1)]/90 backdrop-blur-md">
       {/* Primary nav: Dashboard / History (no top chrome — that's the unified bar's job now) */}
       <nav className={cn("flex flex-col gap-0.5", compact ? "p-1.5 pt-2" : "p-2 pt-3")}>
         <NavItem icon={<LayoutGrid className={iconSize(compact)} />} label="Dashboard"
@@ -433,7 +433,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                           <Tip content="Project settings">
                             <button
                               className={cn(
-                                "rounded p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)] transition-opacity",
+                                "rounded-md p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] transition-opacity",
                                 // Stay visible while the `+` dropdown is
                                 // open (otherwise the gear vanishes the
                                 // moment the user opens the menu).
@@ -457,7 +457,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                               <DropdownTrigger asChild>
                                 <button
                                   onClick={e => e.stopPropagation()}
-                                  className="rounded p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)] data-[state=open]:bg-[var(--color-bg-3)] data-[state=open]:text-[var(--color-fg)]"
+                                  className="rounded-md p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] data-[state=open]:bg-[var(--color-bg-3)] data-[state=open]:text-[var(--color-fg)]"
                                 ><Plus className="h-4 w-4" /></button>
                               </DropdownTrigger>
                             </Tip>
@@ -855,7 +855,7 @@ function WorkspaceRow({ w, compact }: { w: Workspace; compact: boolean }) {
           // edit/diff view (no row). Expanded with an active terminal tab
           // delegates the highlight to that child row instead.
           isActive && (collapsed || !activeTabIsTerminalChild)
-            ? "bg-[var(--color-sel)] text-[var(--color-fg)]"
+            ? "bg-[var(--color-sel)] text-[var(--color-fg)] border border-[var(--color-accent-soft)]/30 rounded-md"
             : isActive
             ? "text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
             : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
@@ -866,7 +866,7 @@ function WorkspaceRow({ w, compact }: { w: Workspace; compact: boolean }) {
           ? <Moon className="shrink-0 h-3.5 w-3.5 mx-0.5 text-[var(--color-fg-faint)] opacity-40" />
           : <button
               onClick={(e) => { e.stopPropagation(); setWorkspaceCollapsed(w.id, !collapsed); }}
-              className="shrink-0 rounded p-0.5 hover:bg-[var(--color-bg-3)] transition-colors"
+              className="shrink-0 rounded-md p-0.5 hover:bg-[var(--color-hover)] transition-colors"
               data-no-drag
             >
               {collapsed
@@ -895,14 +895,14 @@ function WorkspaceRow({ w, compact }: { w: Workspace; compact: boolean }) {
               className="min-w-0 flex-1 rounded border-0 bg-[var(--color-bg-2)] px-1 py-[3px] text-[13px] text-[var(--color-fg)] outline-none ring-1 ring-inset ring-[var(--color-accent)]"
             />
           ) : w.is_repo_root && w.name === w.branch ? (
-            <span className="-ml-1 shrink-0 rounded px-1 py-px text-[10.5px] font-semibold uppercase tracking-wide bg-[var(--color-bg-3)] text-[var(--color-fg-dim)]">
+            <span className="-ml-1 shrink-0 rounded-md border border-[var(--color-border)] px-1 py-px text-[10.5px] font-semibold uppercase tracking-wide bg-[var(--color-bg-2)] text-[var(--color-fg-dim)]">
               REPO ROOT
             </span>
           ) : (
             <>
               <span className="min-w-0 truncate font-medium">{w.name}</span>
               {w.is_repo_root && (
-                <span className="shrink-0 rounded px-1 py-px text-[9.5px] font-semibold uppercase tracking-wide bg-[var(--color-bg-3)] text-[var(--color-fg-faint)]">
+                <span className="shrink-0 rounded-md border border-[var(--color-border)] px-1 py-px text-[9.5px] font-semibold uppercase tracking-wide bg-[var(--color-bg-2)] text-[var(--color-fg-faint)]">
                   REPO
                 </span>
               )}
@@ -946,7 +946,7 @@ function WorkspaceRow({ w, compact }: { w: Workspace; compact: boolean }) {
                 data-no-drag
                 onClick={(e) => e.stopPropagation()}
                 className={cn(
-                  "absolute inset-0 flex items-center justify-center rounded hover:bg-[var(--color-bg-3)]",
+                  "absolute inset-0 flex items-center justify-center rounded-md hover:bg-[var(--color-hover)]",
                   // Sandboxed: button is always visible (the green shield).
                   // Unsandboxed: button reveals on row hover only.
                   w.sandbox_enabled
@@ -1167,7 +1167,7 @@ function WorkspaceRow({ w, compact }: { w: Workspace; compact: boolean }) {
                 title="Close tab"
                 onClick={(e) => { e.stopPropagation(); requestCloseTab(w.id, tab.id); }}
                 className={cn(
-                  "absolute inset-0 flex items-center justify-center rounded p-0.5 text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]",
+                  "absolute inset-0 flex items-center justify-center rounded-md p-0.5 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
                   (showBell || showDone)
                     // Badge visible: X only on badge-slot hover
                     ? "opacity-0 group-hover/badge:opacity-100 pointer-events-none group-hover/badge:pointer-events-auto"

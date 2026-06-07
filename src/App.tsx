@@ -126,10 +126,10 @@ export function App() {
       </div>
       {showSettings && (
         <div
-          className={`fixed inset-0 z-40 flex bg-black/50 ${isFullscreen ? "p-4" : "px-4 pb-4 pt-10"}`}
+          className={`fixed inset-0 z-40 flex bg-black/40 backdrop-blur-sm ${isFullscreen ? "p-4" : "px-4 pb-4 pt-10"}`}
           onMouseDown={e => { if (e.target === e.currentTarget) useApp.getState().closeSettings(); }}
         >
-          <div className="relative w-full overflow-hidden rounded-xl border border-[var(--color-border-soft)] bg-[var(--color-bg)] shadow-2xl">
+          <div className="relative w-full overflow-hidden rounded-xl border border-[var(--color-border-soft)] bg-[var(--color-bg)]/95 backdrop-blur-xl shadow-2xl shadow-black/50">
             <ErrorBoundary label="Settings"><Settings /></ErrorBoundary>
           </div>
         </div>

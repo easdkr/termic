@@ -264,7 +264,7 @@ export function DiffPane({ ws, tab }: { ws: Workspace; tab: DiffTab }) {
           // stays. The merge rules aren't !important themselves, so
           // !important wins regardless of specificity.
           ".cm-changedText": {
-            background: "rgba(64,160,90,0.26) !important",
+            background: "color-mix(in srgb, var(--color-ok) 26%, transparent) !important",
             textDecoration: "none",
             borderRadius: "2px",
             boxShadow: "none",
@@ -273,16 +273,16 @@ export function DiffPane({ ws, tab }: { ws: Workspace; tab: DiffTab }) {
           // removals — tint them red. More specific than the plain
           // `.cm-changedText` above so it wins on that side only.
           "&.cm-merge-a .cm-changedText": {
-            background: "rgba(239,83,80,0.24) !important",
+            background: "color-mix(in srgb, var(--color-err) 24%, transparent) !important",
           },
           ".cm-changedLine": {
-            backgroundColor: "rgba(64,160,90,0.10) !important",
+            backgroundColor: "color-mix(in srgb, var(--color-ok) 10%, transparent) !important",
           },
           ".cm-deletedChunk": {
-            backgroundColor: "rgba(239,83,80,0.08)",
+            backgroundColor: "color-mix(in srgb, var(--color-err) 8%, transparent)",
           },
           ".cm-deletedText": {
-            background: "rgba(239,83,80,0.26) !important",
+            background: "color-mix(in srgb, var(--color-err) 26%, transparent) !important",
             textDecoration: "none",
           },
           // CodeMirror merge wraps inserted/deleted lines in <ins>/<del>

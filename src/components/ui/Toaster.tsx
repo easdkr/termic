@@ -12,9 +12,9 @@ const ICONS = {
 };
 
 const TONE = {
-  success: "border-[var(--color-ok)]/40 text-[var(--color-ok)]",
-  info:    "border-[var(--color-accent)]/40 text-[var(--color-accent)]",
-  error:   "border-[var(--color-err)]/40 text-[var(--color-err)]",
+  success: "border-l-[var(--color-ok)] text-[var(--color-ok)]",
+  info:    "border-l-[var(--color-accent)] text-[var(--color-accent)]",
+  error:   "border-l-[var(--color-err)] text-[var(--color-err)]",
 };
 
 const DEFAULT_TTL_MS = 3200;
@@ -43,7 +43,8 @@ function ToastItem({ t }: { t: Toast }) {
         // icon and action button stay aligned to the first line when
         // the message wraps to multiple lines. break-words so long
         // unbroken segments (paths, URLs) don't blow out the width.
-        "pointer-events-auto flex max-w-[min(640px,calc(100vw-2rem))] items-start gap-2.5 rounded-md border bg-[var(--color-bg-1)] py-2 pl-3 pr-2 shadow-2xl",
+        "pointer-events-auto flex max-w-[min(640px,calc(100vw-2rem))] items-start gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-2)]/95 py-2 pl-3 pr-2 shadow-xl backdrop-blur-xl",
+        "border-l-2",
         TONE[t.kind],
       )}
       role="status"

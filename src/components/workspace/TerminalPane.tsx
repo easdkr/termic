@@ -1358,19 +1358,6 @@ export function TerminalPane({ ws, tab, active }: Props) {
     if (ptyRef.current) ipc.ptyResize(ptyRef.current, t.rows, t.cols).catch(() => {});
   }, [terminalFontId, terminalFontSize, terminalLetterSpacing]);
 
-  // Live theme swap: when the user picks a different theme in the
-  // dropdown, push the new xterm palette into every mounted terminal.
-  // xterm's `options.theme` setter triggers an internal repaint so we
-  // don't need to touch the WebGL atlas explicitly.
-  const themeMode = usePrefs(s => s.themeMode);
-  const firstThemeRun = useRef(true);
-  useEffect(() => {
-    if (firstThemeRun.current) { firstThemeRun.current = false; return; }
-    const t = termRef.current;
-    if (!t) return;
-    t.options.theme = currentTerminalTheme() as any;
-  }, [themeMode]);
-
   // YOLO live toggle — for agents that support runtime mode switching (only
   // kimi today), send the appropriate slash command. For claude/codex this
   // is a no-op; the next spawn picks up the new flag.

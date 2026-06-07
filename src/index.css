@@ -19,35 +19,24 @@
    ──────────────────────────────────────────────────────────────────────── */
 
 @theme {
-  /* @theme defaults are the DARK palette — that's the app's primary look.
-     The light palette overrides below under `html.light` (see :where rules).
-     Tokens are neutral-warm gray with the terracotta accent (#d97757). */
-  /* "Dark+" — neutral / cooler palette modeled after Conductor's
-     surfaces. Slightly elevated bg ladder, crisper hairline borders
-     (so panel edges and the top-bar separator actually read), and
-     a neutral off-white fg without the warm cream tint our base
-     Dark uses. Same terracotta accent. */
-  --color-bg:        #0c0c0c;
-  --color-bg-1:      #141414;
-  --color-bg-2:      #1c1c1c;
-  --color-bg-3:      #282828;
-  --color-fg:        #e8e6e2;
-  --color-fg-dim:    #a8a6a2;
-  --color-fg-faint:  #6e6c68;
-  --color-border:    #333333;
-  --color-border-soft: #232323;
-  --color-hover:     rgba(255, 248, 240, 0.045);
-  --color-sel:       rgba(217, 119, 87, 0.20);
-  --color-accent:    #d97757;
-  --color-accent-soft: rgba(217, 119, 87, 0.22);
-  /* Darker accent for button surfaces. Pure accent looks fine on
-     small icons + 1px borders but reads thin/light when used as a
-     button background - especially on the brighter themes (cobalt).
-     White text + accent-deep should hit ≥4.5:1 contrast. */
-  --color-accent-deep: #b35e3f;
-  --color-ok:        #4caf50;
-  --color-warn:      #f0b13a;
-  --color-err:       #ef5350;
+  /* Linear — cool charcoal + indigo accent. The only theme. */
+  --color-bg:          #0E0E10;
+  --color-bg-1:        #121214;
+  --color-bg-2:        #1A1A1E;
+  --color-bg-3:        #232328;
+  --color-fg:          #F0F0F5;
+  --color-fg-dim:      #A0A0B0;
+  --color-fg-faint:    #6E6E80;
+  --color-border:      rgba(255, 255, 255, 0.08);
+  --color-border-soft: rgba(255, 255, 255, 0.05);
+  --color-hover:       rgba(255, 255, 255, 0.06);
+  --color-sel:         rgba(94, 106, 210, 0.22);
+  --color-accent:      #5E6AD2;
+  --color-accent-soft: rgba(94, 106, 210, 0.22);
+  --color-accent-deep: #4B55B0;
+  --color-ok:          #4caf50;
+  --color-warn:        #f0b13a;
+  --color-err:         #ef5350;
 
   --color-cli-claude:   #d97757;
   --color-cli-kimi:     #00b4ff;
@@ -57,9 +46,12 @@
   --color-cli-agy:      #8b5cf6;
   --color-cli-grok:     #cbd5e1;
 
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
   --radius-pill: 999px;
-  /* Default mono. Overridden at runtime by the font picker (writes the
-     CSS var on document.documentElement and persists in localStorage). */
+  /* Default mono. Overridden at runtime by the font picker. */
   --font-mono: "JetBrains Mono", "SF Mono",
                ui-monospace, Menlo, "Cascadia Mono", Consolas, monospace;
 }
@@ -102,136 +94,9 @@
     color-scheme: dark;
   }
 
-  /* Light-mode palette. Activated by `html.light` (set by applyTheme()).
-     Warm neutral creams + ivories, same terracotta accent so brand identity
-     carries across themes. Hover/sel use translucent darks instead of lights. */
-  html.light {
-    --color-bg:          #faf9f6;
-    --color-bg-1:        #f3f1ec;
-    --color-bg-2:        #ebe8e1;
-    --color-bg-3:        #ddd9d0;
-    --color-fg:          #1c1b1a;
-    --color-fg-dim:      #55534f;
-    --color-fg-faint:    #8b8884;
-    --color-border:      #d4d0c8;
-    --color-border-soft: #e5e2dc;
-    --color-hover:       rgba(28, 27, 26, 0.05);
-    --color-sel:         rgba(217, 119, 87, 0.18);
-    --color-accent:      #c25e3d;       /* shifted slightly for contrast on light bg */
-    --color-accent-soft: rgba(194, 94, 61, 0.20);
-    --color-accent-deep: #a04a2c;       /* button bg on cream surfaces */
-    /* Grok's mark is neutral, not a vivid brand hue — bump to a darker
-       slate in light mode so it doesn't disappear against the cream bg. */
-    --color-cli-grok:    #64748b;
-    color-scheme: light;
-  }
-
-  /* Enhance file/folder icons contrast in light mode to prevent them from looking faded */
-  html.light .file-icon {
-    filter: brightness(0.7) saturate(1.4) contrast(1.15);
-  }
-
-  /* "Dark" — termic's default theme, matched to terax-ai's "Claude"
-     palette (warm charcoal). The defining move: chrome surfaces
-     (sidebar / title bar / tab strip / right panel — all bound to
-     --color-bg-1) sit ONE STOP LIGHTER than the main content area
-     (--color-bg), the same elevation direction every other dark
-     theme here uses and exactly what terax does. The previous values
-     had the sidebar (#1a1918) DARKER than the main area (#1f1e1d),
-     inverting the hierarchy so it read nothing like terax. */
-  html.claude {
-    --color-bg:          #1f1e1d;       /* main content area (terax `background`) */
-    --color-bg-1:        #262624;       /* chrome: sidebar / title bar / tabs (terax `card`) */
-    --color-bg-2:        #2a2926;       /* nested cards / badges (terax `secondary`/`muted`) */
-    --color-bg-3:        #2f2d2a;       /* hover + active surfaces (terax `accent`) */
-    --color-fg:          #f5f4ee;       /* primary text (terax `foreground`) */
-    --color-fg-dim:      #b0a89a;       /* muted text (terax `mutedForeground`) */
-    --color-fg-faint:    #6c685f;       /* faint icons / secondary text */
-    --color-border:      rgba(245, 244, 238, 0.10); /* terax `border` */
-    --color-border-soft: rgba(245, 244, 238, 0.05); /* hairline borders */
-    --color-hover:       rgba(245, 244, 238, 0.04); /* subtle hover overlay */
-    --color-sel:         rgba(217, 119, 87, 0.22);  /* terax accent-tinted selection */
-    --color-accent:      #d97757;       /* terax `primary` */
-    --color-accent-soft: rgba(217, 119, 87, 0.22);
-    --color-accent-deep: #b35e3f;
-    color-scheme: dark;
-  }
-
-  /* Cobalt — Wes Bos's Cobalt 2 palette. Deep navy surfaces with a
-     bright sky-blue chrome accent (Cobalt the element is blue; the
-     accent should match the name). Yellow #ffc600 is Cobalt 2's
-     syntax-highlight color for keywords, and stays on the TERMINAL
-     palette where it belongs - using it for UI chrome read as
-     off-brand because users associate "cobalt" with the blue, not
-     the editor-only syntax yellow. */
-  html.cobalt {
-    --color-bg:          #193549;
-    --color-bg-1:        #1f4662;
-    --color-bg-2:        #234a6a;
-    --color-bg-3:        #2c5278;
-    --color-fg:          #e1efff;
-    --color-fg-dim:      #aacdee;
-    --color-fg-faint:    #6a93b7;
-    /* Borders bumped a notch lighter than the bg ladder so panel
-       edges + tab strips + dividers actually read against the navy
-       surfaces. Previous values (#2c5278 / #1f4662) collapsed into
-       --color-bg-3 / --color-bg-1 — invisible. */
-    --color-border:      #4a7ba8;
-    --color-border-soft: #3a6589;
-    --color-hover:       rgba(102, 196, 255, 0.06);
-    --color-sel:         rgba(102, 196, 255, 0.22);
-    --color-accent:      #66c4ff;   /* bright cobalt sky */
-    --color-accent-soft: rgba(102, 196, 255, 0.22);
-    /* Cobalt's bright sky-blue looks washed-out as a button bg
-       against the navy panels. Drop down a couple of stops into
-       a deep azure that still reads cobalt-family. */
-    --color-accent-deep: #1f6fa8;
-    color-scheme: dark;
-  }
-
-  /* Matrix — CRT vibe via the accent + terminal, not the whole UI.
-     Chrome text is warm off-white gray (readable for long sessions);
-     the phosphor green (#00ff41) is reserved for the accent + the
-     agent terminal output, where "Matrix" actually makes sense. The
-     bg keeps a hairline green tint (#050905) so surfaces feel like
-     CRT phosphor without bleeding into every label. */
-  html.matrix {
-    --color-bg:          #050905;
-    --color-bg-1:        #0d130d;
-    --color-bg-2:        #161e16;
-    --color-bg-3:        #20281f;
-    --color-fg:          #c8cdc4;       /* off-white, warm gray */
-    --color-fg-dim:      #8b918a;
-    --color-fg-faint:    #5a6058;
-    --color-border:      #2a322a;
-    --color-border-soft: #181f18;
-    --color-hover:       rgba(63, 185, 80, 0.06);
-    --color-sel:         rgba(63, 185, 80, 0.20);
-    --color-accent:      #3fb950;       /* calmer green - reads matrix without burning the retina */
-    --color-accent-soft: rgba(63, 185, 80, 0.20);
-    --color-accent-deep: #2a7a36;       /* deeper phosphor for button surfaces */
-    color-scheme: dark;
-  }
-
-  /* Solarized Dark — Ethan Schoonover's palette (base03/02/01/00 + base0/1).
-     We shift the brand accent to solarized orange (#cb4b16) because the
-     terracotta clashes with the cool teal of base03; Solarized has its
-     own visual identity that fights with the default. */
-  html.solarized {
-    --color-bg:          #002b36;       /* base03 */
-    --color-bg-1:        #073642;       /* base02 */
-    --color-bg-2:        #0a4756;
-    --color-bg-3:        #105566;
-    --color-fg:          #93a1a1;       /* base1 */
-    --color-fg-dim:      #839496;       /* base0 */
-    --color-fg-faint:    #586e75;       /* base01 */
-    --color-border:      #1c5566;
-    --color-border-soft: #0d4555;
-    --color-hover:       rgba(238, 232, 213, 0.04);
-    --color-sel:         rgba(38, 139, 210, 0.22);
-    --color-accent:      #cb4b16;       /* solarized orange */
-    --color-accent-soft: rgba(203, 75, 22, 0.22);
-    --color-accent-deep: #9d3a11;       /* deeper solarized orange for buttons */
+  /* Linear is the only theme — already defined in @theme above.
+     html.linear class is applied at load for explicitness. */
+  html.linear {
     color-scheme: dark;
   }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -333,4 +198,24 @@
 .termic-drop-target {
   box-shadow: inset 0 0 0 2px var(--color-accent);
   background-color: var(--color-accent-soft);
+}
+
+/* Surface utilities — used by panels, modals, and floating chrome that need
+   a consistent elevated look across all themes. */
+.glass {
+  background-color: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.glass-strong {
+  background-color: rgba(18, 18, 20, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.surface-elevated {
+  background-color: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
 }

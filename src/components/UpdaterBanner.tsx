@@ -49,7 +49,7 @@ export function UpdaterBanner() {
       onClick={() => void install()}
       disabled={installing !== null}
       title={`Update to ${update.version} (current: ${update.currentVersion})`}
-      className="flex items-center gap-1.5 rounded-full border border-[var(--color-accent-deep)] bg-[var(--color-accent-deep)] px-2.5 py-0.5 text-[12px] font-medium text-white hover:bg-[#8a3a1c] disabled:opacity-70"
+      className="flex items-center gap-1.5 rounded-full border border-[var(--color-accent-deep)] bg-[var(--color-accent-deep)] px-2.5 py-0.5 text-[12px] font-medium text-white hover:bg-[var(--color-accent)] disabled:opacity-70"
     >
       {installing === null && (
         <>

@@ -14,8 +14,8 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
         // so Input + Button rows (Browse, Add, etc.) line up at the same
         // baseline. Without an explicit height the input was ~36px from
         // `py-2`, but Button default md is 32px → 4px misalignment.
-        "h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 text-[13px] text-[var(--color-fg)]",
-        "outline-none transition-colors focus:border-[var(--color-accent)] focus:ring-[3px] focus:ring-[var(--color-accent-soft)]",
+        "h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-1)]/60 px-3 text-[13px] text-[var(--color-fg)] backdrop-blur-sm",
+        "outline-none transition-all duration-150 focus:border-[var(--color-accent)] focus:bg-[var(--color-bg-1)] focus:ring-2 focus:ring-[var(--color-accent-soft)]",
         className,
       )}
       {...rest}

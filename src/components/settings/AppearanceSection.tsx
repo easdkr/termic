@@ -282,7 +282,7 @@ function Toggle({ label, hint, value, onChange }: { label: string; hint?: string
             left: value ? 18 : 2,
             width: 16, height: 16,
             borderRadius: 999,
-            background: "#ffffff",
+            background: "var(--color-fg)",
             boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
             transition: "left 150ms",
           }}

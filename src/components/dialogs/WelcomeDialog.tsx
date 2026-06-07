@@ -23,8 +23,7 @@ import { useApp } from "@/store/app";
 import { CliIcon, CLI_LABEL } from "@/icons/cli";
 import { TermicMark } from "@/icons/TermicLogo";
 import { cn } from "@/lib/utils";
-import { usePrefs, applyTheme, type ThemeMode } from "@/store/prefs";
-import { Sun, Moon, Monitor, Sunrise, Droplet, Binary, Code2 } from "lucide-react";
+import { usePrefs, applyTheme } from "@/store/prefs";
 
 type Step = 0 | 1 | 2;
 
@@ -305,69 +304,25 @@ function StepRepos({ dir, setDir, summary, clis, setClis, browse }: {
   );
 }
 
-// ── Step 2: theme picker with visual previews ────────────────────────
-// Live-applies on click so the user sees the change immediately - the
-// rest of the app rerenders into the new palette behind the dialog,
-// dialog itself stays anchored.
-const THEME_ITEMS: { id: ThemeMode; label: string; icon: typeof Sun; swatch: [string, string, string] }[] = [
-  { id: "auto",      label: "System",         icon: Monitor, swatch: ["#0a0a0a", "#fdf6e3", "#d97757"] },
-  { id: "light",     label: "Light",          icon: Sun,     swatch: ["#faf9f6", "#1c1b1a", "#c25e3d"] },
-  { id: "claude",    label: "Claude",         icon: Moon,    swatch: ["#1f1e1d", "#f5f4ee", "#d97757"] },
-  { id: "dark",      label: "Dark+",          icon: Code2,   swatch: ["#0c0c0c", "#e8e6e2", "#d97757"] },
-  { id: "solarized", label: "Solarized Dark", icon: Sunrise, swatch: ["#002b36", "#93a1a1", "#cb4b16"] },
-  { id: "cobalt",    label: "Cobalt",         icon: Droplet, swatch: ["#193549", "#e1efff", "#66c4ff"] },
-  { id: "matrix",    label: "Matrix",         icon: Binary,  swatch: ["#000800", "#00ff41", "#00ff41"] },
-];
+// ── Step 2: theme (Linear only) ──────────────────────────────────────
 function StepTheme() {
-  const themeMode = usePrefs(s => s.themeMode);
-  const setThemeMode = usePrefs(s => s.setThemeMode);
   return (
     <div className="flex flex-col gap-3">
       <p className="text-[13px] text-[var(--color-fg-dim)]">
-        Live-applies as you click. Change anytime from the top toolbar.
+        Termic uses the Linear dark theme.
       </p>
-      <div className="grid grid-cols-2 gap-2">
-        {THEME_ITEMS.map(t => {
-          const active = t.id === themeMode;
-          const Ic = t.icon;
-          const [bg, fg, accent] = t.swatch;
-          return (
-            <button
-              key={t.id} type="button"
-              onClick={() => { setThemeMode(t.id); applyTheme(t.id); }}
-              className={cn(
-                "flex items-center gap-2.5 rounded-md border px-3 py-2 text-left transition-colors",
-                active
-                  ? "border-[var(--color-accent)] bg-[var(--color-bg-1)]"
-                  : "border-[var(--color-border-soft)] hover:border-[var(--color-border)] bg-[var(--color-bg)]",
-              )}
-            >
-              {/* Swatch preview - bg surface, fg text on top of it, accent stripe. */}
-              <span
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md ring-1 ring-black/20"
-                style={{ background: bg }}
-              >
-                <span className="text-[11px] font-bold" style={{ color: fg }}>Aa</span>
-                <span className="absolute -mb-7 ml-7 h-1.5 w-1.5 rounded-full" style={{ background: accent }} />
-              </span>
-              <div className="flex min-w-0 flex-col">
-                <span className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--color-fg)]">
-                  <Ic className="h-3.5 w-3.5 text-[var(--color-fg-dim)]" />
-                  {t.label}
-                </span>
-                <span className="text-[11.5px] text-[var(--color-fg-faint)]">
-                  {t.id === "auto" && "follows macOS"}
-                  {t.id === "light" && "cream + terracotta"}
-                  {t.id === "claude" && "warm charcoal + clay"}
-                  {t.id === "dark" && "deeper near-black"}
-                  {t.id === "solarized" && "Schoonover palette"}
-                  {t.id === "cobalt" && "deep navy + sky blue"}
-                  {t.id === "matrix" && "phosphor green CRT"}
-                </span>
-              </div>
-            </button>
-          );
-        })}
+      <div className="flex items-center gap-3 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-2">
+        <span
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md ring-1 ring-black/20"
+          style={{ background: "#0E0E10" }}
+        >
+          <span className="text-[11px] font-bold" style={{ color: "#F0F0F5" }}>Aa</span>
+          <span className="absolute -mb-7 ml-7 h-1.5 w-1.5 rounded-full" style={{ background: "#5E6AD2" }} />
+        </span>
+        <div className="flex min-w-0 flex-col">
+          <span className="text-[13px] font-medium text-[var(--color-fg)]">Linear</span>
+          <span className="text-[11.5px] text-[var(--color-fg-faint)]">cool charcoal + indigo</span>
+        </div>
       </div>
     </div>
   );

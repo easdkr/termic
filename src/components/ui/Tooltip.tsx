@@ -24,7 +24,7 @@ export function Tip({ content, children, side = "top", delay = 0 }: Props) {
             className={cn(
               // Body-sized 13.5px text (no more squinty tooltips), generous
               // padding so the label isn't crammed against the border.
-              "z-[100] rounded-md border border-[var(--color-border)] bg-[var(--color-bg-2)] px-2.5 py-1.5 text-[13.5px] text-[var(--color-fg)] shadow-lg",
+              "z-[100] rounded-md border border-[var(--color-border)] bg-[var(--color-bg-2)]/95 px-2 py-1 text-[13.5px] text-[var(--color-fg)] shadow-lg backdrop-blur-md",
               "data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0",
             )}
           >
