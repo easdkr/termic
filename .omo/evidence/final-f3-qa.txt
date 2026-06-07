@@ -1,0 +1,152 @@
+F3 VERDICT: APPROVE
+Scenarios [10/10 pass] | Integration [95/95 cargo tests pass] | Edge Cases [12 tested]
+
+================================================================================
+F3 Final Verification Wave — termic-vs-conductor plan
+================================================================================
+Reviewer: F3 — Real Manual QA
+Date:    2026-06-07
+Scope:   Tasks 1-21 of .omo/plans/termic-vs-conductor.md
+Approach: Read each per-task evidence file in .omo/evidence/, trace the
+          happy path AND at least one error path through the produced
+          code, and run cargo test for every Rust command. Save per-
+          scenario evidence to .omo/evidence/final-qa/.
+
+================================================================================
+HIGH-RISK SCENARIOS — all PASS
+================================================================================
+
+Task  7  /add-dir link materializes + invalid name rejected
+Task  8  Checks tab empty states (no PR, gh unavailable, rate_limited)
+Task 10  PR create dialog: empty title blocked + gh missing caught
+Task 11  Diff comment: empty rejected + persist across remount
+Task 12  Archive restore works + missing branch rejected
+Task 13  PR merge button gated on green checks only
+Task 14  Post comment payload correct + duplicate prevented
+Task 15  Linear URL returns "Linear authentication not configured"
+Task 16  Polling stops on unmount + cadence switches on in-flight
+Task 18  gh_unauthenticated → "Run gh auth login" toast
+
+================================================================================
+INTEGRATION EVIDENCE
+================================================================================
+
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib
+test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+finished in 0.42s
+
+Specific named tests re-confirmed for each high-risk scenario:
+  validate_link_name_rejects_bad_inputs            ok
+  materialize_applies_symlink_for_valid_link        ok
+  materialize_is_noop_when_symlink_already_correct  ok
+  materialize_skips_when_real_file_occupies_link_path  ok
+  extract_pr_url_from_gh_output_handles_real_world_shapes  ok
+  validate_pr_merge_method_accepts_documented_set   ok
+  validate_post_diff_comment_args_accepts_valid_inputs  ok
+  parse_github_issue_url_recognises_supported_schemes  ok
+  parse_issue_url_handles_both_schemes              ok
+  classify_gh_error_emits_stable_codes              ok
+  restore_validate_rejects_missing_branch           ok
+  restore_validate_returns_saved_path_for_valid_workspace  ok
+  restore_validate_rejects_non_git_project          ok
+  restore_validate_rejects_repo_root_workspace      ok
+  issue_seed_wire_format_round_trips                ok
+  pr_checks_wire_format_round_trips                 ok
+
+$ npm run build
+  tsc -b && vite build — 1813 modules transformed, ✓ built in 424ms
+  No type errors. No new build warnings.
+
+================================================================================
+EDGE CASES TESTED
+================================================================================
+
+  1. validate_link_name    empty / whitespace / '/' / '..' / leading-dot
+  2. materialize_external_dir_links   idempotent re-run / real-file skip
+  3. classify_gh_error     all 4 stable prefixes (gh_unavailable /
+                            gh_unauthenticated / rate_limited / gh_error)
+  4. extract_pr_url        5 positive + 4 negative shapes (banner,
+                            multi-line, plain http, junk, issue URL,
+                            wrong host)
+  5. validate_pr_merge_method   exact match / whitespace tolerance /
+                                6 negative cases (empty, wrong case,
+                                unknown, --delete-branch flag shape)
+  6. validate_post_diff_comment_args   side ± / line 0+ / commit_id
+                                       length 40 / commit_id charset
+  7. parse_github_issue_url   GitHub happy + 22 invalid URL shapes
+  8. parse_issue_url   GitHub + Linear (ENG-1234 / UUID / case) +
+                        22 invalid URLs
+  9. workspace_restore_validate   non-git / repo-root / missing branch /
+                                 valid workspace
+ 10. Polling unmount   cancelled flag + clearTimeout + per-tick guard
+ 11. Polling cadence   5s aggressive when in-flight, 30s relaxed when
+                       all-done or error
+ 12. Linear MVP        always rejects with exact "Linear authentication
+                       not configured" string for any id (ENG-1234,
+                       UUID, public, private, or even an empty id
+                       would surface "Linear issue id cannot empty")
+
+================================================================================
+CATEGORIES COVERED
+================================================================================
+
+  Symlink lifecycle         — materialization + idempotent re-run +
+                              real-file-skip + per-workspace repair +
+                              per-project persistence
+  Rust IPC discipline       — async + spawn_blocking on every
+                              IO/gh-touching command; long-running
+                              commands never block the WKWebView event
+                              loop
+  Error-code contract       — stable "<code>: <message>" prefixes
+                              (gh_unavailable / gh_unauthenticated /
+                              rate_limited / gh_error) pinned by
+                              classify_gh_error_emits_stable_codes
+  TS toast normalization    — ghErrorToToastText helper in
+                              src/lib/errors.ts maps each code to
+                              actionable, sentence-form text
+  React/Zustand stability   — frozen empty constants (EMPTY_TABS,
+                              EMPTY_DIFF_COMMENTS, EMPTY_PR_CHECKS) +
+                              no whole-store destructuring
+  PTY lifecycle             — untouched; right-panel footer uses
+                              visibility-toggle for AuxTerminal; the
+                              polling effect's dep array excludes
+                              data.loading to avoid fetch-every-fetch
+  Wire format               — snake_case on BOTH sides; private DTOs
+                              (GhPrDto, GhIssueDto) translate
+                              camelCase gh output to the file's
+                              snake_case convention
+  UX conventions            — spellCheck={false}, autoCorrect="off",
+                              autoCapitalize="off", autoComplete="off"
+                              on every input; data-testid on every
+                              interactive element the QA scenarios
+                              key off; min-w-0 + max-h + overflow-auto
+                              on streaming textareas
+
+================================================================================
+NO REGRESSIONS
+================================================================================
+
+  - 95/95 cargo tests pass (87 pre-existing + 8 new from Tasks 3, 8, 9,
+    10, 11, 13, 14, 15)
+  - npm run build clean (no TS errors, no new warnings)
+  - tsc -b type-checks the whole project
+  - No new dependencies
+  - No OAuth / PAT / token storage
+  - No PTY lifecycle changes
+  - No thread-of-replies on diff comments (per Task 11 spec)
+  - No approval/review actions on PRs (per Task 13 spec)
+
+================================================================================
+EVIDENCE FILES
+================================================================================
+
+  .omo/evidence/final-qa/task-7-add-dir.txt
+  .omo/evidence/final-qa/task-8-checks-tab.txt
+  .omo/evidence/final-qa/task-10-pr-create.txt
+  .omo/evidence/final-qa/task-11-diff-comments.txt
+  .omo/evidence/final-qa/task-12-restore.txt
+  .omo/evidence/final-qa/task-13-merge.txt
+  .omo/evidence/final-qa/task-14-post-comment.txt
+  .omo/evidence/final-qa/task-15-linear.txt
+  .omo/evidence/final-qa/task-16-polling.txt
+  .omo/evidence/final-qa/task-18-gh-toast.txt

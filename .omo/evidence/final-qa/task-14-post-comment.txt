@@ -1,0 +1,57 @@
+TASK 14 — Post comment payload correct + duplicate prevented
+==================================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:522-545
+Subagent evidence: .omo/evidence/task-14-post-payload.json
+
+SCENARIO 1 — post one inline comment, payload correct
+------------------------------------------------------
+Code locations traced:
+  - src/components/workspace/DiffCommentPopover.tsx:172-214  postToGitHub
+    - Early-returns if c.remote_id is truthy (defense in depth — the
+      render layer hides the button via canPost = !c.remote_id && !!pr
+      && !!pr.head_sha so this is a belt-and-suspenders check)
+    - Looks up PR snapshot via usePrChecks(wsId) and project_id via
+      useWorkspace(wsId) selectors
+    - askConfirm dialog: "Post comment to PR #N?" / "Post to GitHub"
+    - On confirm: githubPrPostDiffComment({ projectId, prNumber,
+      commitId: headSha, path, line, side, body: c.body })
+    - On success: markDiffCommentPosted(wsId, c.id, remoteId, ISO) +
+      pushToast(`Comment posted to PR #${pr.number}`, "success")
+
+  - src-tauri/src/lib.rs:6843-6967  github_pr_post_diff_comment_blocking
+    - validate_post_diff_comment_args: side in {"left","right"}, line > 0,
+      commit_id is exactly 40 hex chars (SHA1). Pin test passes:
+      $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- validate_post_diff_comment
+      test tests::validate_post_diff_comment_args_accepts_valid_inputs ... ok
+    - path + body non-empty (defense in depth)
+    - Step 1: `gh repo view --json owner,nameWithOwner` (parses the
+      JSON, extracts nameWithOwner, validates it contains "/")
+    - Step 2: `gh api repos/<owner_repo>/pulls/<pr>/comments` with
+      -f body=, -f commit_id=, -f path=, -F line= (raw field, so it
+      serializes as JSON int, not string), -f side=
+    - Response: parses the JSON, extracts .id (must be positive u64 —
+      "0, missing, or non-uint" all error loudly)
+
+SCENARIO 2 — duplicate post prevented
+-------------------------------------
+Two layers:
+  1. Render layer (DiffCommentPopover.tsx:279):
+       const canPost = !c.remote_id && !!pr && !!pr.head_sha;
+     When c.remote_id is set, the "Post to GitHub" button is not
+     rendered at all — only the "Posted" badge (link to the GitHub
+     discussion URL with `#discussion_r<remoteId>`) is shown.
+  2. Function layer (DiffCommentPopover.tsx:173):
+       if (c.remote_id) return;
+     The postToGitHub function early-returns if remote_id is set, so
+     even a programmatic call (or a future button restoration) cannot
+     re-fire the IPC.
+  3. Store layer (app.ts:318-332 markDiffCommentPosted):
+       if (c.remote_id === remoteId && c.posted_at === postedAt) return c;
+     The action is idempotent — re-stamping the same values is a no-op
+     (returns s unchanged, so React doesn't re-render).
+
+VERDICT: PASS — the payload shape is correct (the gh api args mirror
+the documented GitHub PR review-comments API exactly: body, commit_id,
+path, line, side), the validate_post_diff_comment_args test pins the
+input gate, and the duplicate guard is enforced at three layers (render,
+function, store).

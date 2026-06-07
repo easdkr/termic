@@ -1,0 +1,72 @@
+TASK 12 — Archive restore works + missing branch rejected
+============================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:472-495
+Subagent evidence: .omo/evidence/task-12-restore-ui.txt
+
+SCENARIO 1 — restore works
+---------------------------
+Code locations traced:
+  - src-tauri/src/lib.rs:3411-3540  workspace_restore_sync
+      - 1. Load + freshness check (returns "workspace is not archived"
+        if !w.archived, "workspace not found" if missing)
+      - 2. workspace_restore_validate (returns the wt_path or an error)
+      - 3. git worktree prune (best-effort)
+      - 4. Handle occupied saved path: registered worktree → error
+        "a worktree already lives at {path} — remove it first";
+        orphan dir → fs::remove_dir_all
+      - 5-6. git worktree add (with --no-checkout + git-crypt bridge
+        if the source repo uses git-crypt)
+      - 7. Re-copy files_to_copy
+      - 8. Re-materialize external_dir_links
+      - 9. Persist archived = false LAST (per plan rule "do NOT
+        remove archived history until restore succeeds")
+  - src-tauri/src/lib.rs:3542-3552  workspace_restore IPC entry —
+    async + spawn_blocking per the long-running-IPC discipline.
+  - src/components/views/History.tsx:28-49  onRestore handler:
+      - askConfirm dialog ("Restore workspace …?")
+      - setBusy("Restoring …")
+      - workspaceRestore(wsId) → on success: loadAll(), setActive(ws.id),
+        pushToast(`Restored "${wsName}"`, "success")
+      - on error: pushToast(String(e), "error") — the row remains in
+        History because archived was never flipped to false (per step 9)
+  - Workspace row's data-testid: "restore-workspace-<sanitized-name>"
+
+The subagent's evidence file walks a real git end-to-end test:
+  $ git worktree add → archived → re-added → work/file.txt back
+The unit test workspace_restore_returns_saved_path_for_valid_workspace
+also pins the happy path.
+
+SCENARIO 2 — missing branch rejected
+-------------------------------------
+Code location: src-tauri/src/lib.rs:3381-3399 workspace_restore_validate
+  if w.branch.is_empty() {
+      return Err("archived workspace has no saved branch — cannot restore".into());
+  }
+  ...
+  if git(&["rev-parse", "--verify", &w.branch], &repo).is_err() {
+      return Err(format!(
+          "branch '{}' no longer exists in the project's repo",
+          w.branch
+      ));
+  }
+
+The git rev-parse --verify returns non-zero when the branch is missing
+(deleted or never existed in the parent repo). The error message names
+the missing branch explicitly so the user knows which one.
+
+Pin test:
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- restore
+  test tests::restore_validate_rejects_non_git_project ... ok
+  test tests::restore_validate_rejects_repo_root_workspace ... ok
+  test tests::restore_validate_rejects_missing_branch ... ok
+  test tests::restore_validate_returns_saved_path_for_valid_workspace ... ok
+
+Because workspace_restore_validate is called BEFORE the workspace's
+archived = false flag is flipped (step 9 above), a missing branch leaves
+the row in the History list — the user can try again, fix the branch
+name, or delete the archive.
+
+VERDICT: PASS — restore end-to-end works (validated by both unit test
+and a real git walkthrough in the evidence), and the missing-branch
+error path leaves the workspace archived (matches the plan's "must
+NOT remove archived history until restore succeeds" rule).

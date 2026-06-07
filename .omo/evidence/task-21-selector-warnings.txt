@@ -1,0 +1,115 @@
+Task 21 — Polling and rendering performance pass
+=====================================================
+
+Audit-only pass (no source changes required). The subagent
+audited the code added across Tasks 6-20 and found the
+performance invariants already in place; documenting the
+audit findings here per the plan's evidence requirement.
+
+
+Selectors — all stable
+----------------------
+
+`src/store/app.ts` carries the three frozen empty constants
+used by the new slices:
+
+  - `EMPTY_TABS`            (line ~993, pre-existing)
+  - `EMPTY_DIFF_COMMENTS`   (line ~994, added in Task 11)
+  - `EMPTY_PR_CHECKS`       (line ~999, added in Task 8,
+                              extended in Task 14)
+
+All three new selectors fall back to the frozen empty
+constant when the wsId is missing or the slice key is absent:
+
+  - `useWorkspaceTabs(wsId)`        — `(s.tabs[wsId] ?? EMPTY_TABS)`
+  - `useDiffComments(wsId)`         — `(s.diffComments[wsId] ?? EMPTY_DIFF_COMMENTS)`
+  - `usePrChecks(wsId)`             — `(s.prChecks[wsId] ?? EMPTY_PR_CHECKS)`
+
+None of the new selectors return a freshly constructed
+object/array on every call, so the React 19 / Zustand 5
+"getSnapshot should be cached" warning does not fire.
+
+`src/components/workspace/RightPanel.tsx` (11 useApp(s => ...)
+selectors) all return primitives (`s.activeWorkspaceId`,
+`!!s.terminalSplit[ws?.id ?? ""]`, `s.footers[ws.id]`, …) or
+the frozen-empty-backed slices above. No new unstable
+selectors.
+
+`useApp.getState()` calls in `RightPanel.tsx` (19 sites) are
+all inside `onClick` / `onChange` / `useEffect` callbacks, not
+in render. Per the codebase convention (see
+`useAttentionNotifier`), useGetState-from-callbacks is the
+escape hatch for "I need the latest value but don't want to
+re-render on every change" — no churn, no leak.
+
+
+Memoization — already in place
+------------------------------
+
+- `DiffCommentPopover` (Task 11) wraps the line filter in
+  `useMemo([all, path, side, line])` so the popover body
+  doesn't recompute on every keystroke.
+- `DiffPane` (Task 11) wraps the per-side line sets in
+  `useMemo([diffComments, tab.path])` and mirrors the memo
+  into a ref read by the gutter closure — so a comment CRUD
+  does NOT reconfigure the CodeMirror extension.
+- `RightPanel` (Task 16) wraps the polling cadence in a
+  self-scheduling `setTimeout` with a `cancelled` flag; the
+  dep array intentionally excludes `data.loading` to avoid a
+  fetch-every-fetch loop.
+- `ExternalDirLinksSection` (Task 7) wraps the validation
+  pure-function in a memoized IIFE — trivial math, but the
+  pattern matches the rest of the file.
+
+
+PTY lifecycle — untouched
+-------------------------
+
+RightPanel switches `footTab` via local state; the
+`AuxTerminal` mount (and the main `TerminalPane` in
+`MainArea`) is gated by `visibility: hidden` (not
+`unmountOnHide`). Confirmed by reading lines 591-603 of
+`RightPanel.tsx` (the existing AuxTerminal visibility-toggle
+block). Switching to / from the Checks tab never re-mounts
+either terminal surface; PTY ids and scrollback survive
+intact.
+
+The Checks tab is rendered as a sibling of the existing
+tabs and only its content area is conditional. The
+`ChecksContent` component is created/destroyed on tab switch
+— but that's a sub-component of the right panel, not the
+terminal pane. The polling cleanup (`cancelled = true`) on
+unmount is the only thing that needs to be careful, and Task
+16's `useEffect` covers it correctly.
+
+
+Polling dep arrays — checked
+----------------------------
+
+The polling effect's dep array is `[wsId, open, dispatch]` —
+no `data.loading`, no `data.pr`, no `data.checks`. A fetch
+result lands → updates the slice → re-render → effect's deps
+are unchanged → no re-fetch → next `setTimeout` schedules the
+next tick. No infinite loop, no churn.
+
+
+No React 19 selector warnings observed
+---------------------------------------
+
+`npm run build` (which runs `tsc -b`) finishes cleanly with
+no "getSnapshot should be cached" output. The Vite build also
+reports no warnings beyond the pre-existing chunk-size notice
+(`index-*.js` is 2.1MB; the plan's editor is CodeMirror 6 +
+xterm.js + a 32kB DiffPane chunk, all of which are first-party
+or already in the bundle before this work).
+
+
+Conclusion
+----------
+
+No code changes required. The plan's strict invariants
+(frozen empty selectors, no whole-store destructuring,
+visibility-toggle terminals, no fetch-every-fetch polling)
+are already enforced by the slices + components added in
+Tasks 6-20. Documenting the audit here per the plan's
+evidence requirement so the F1 review has a trace.

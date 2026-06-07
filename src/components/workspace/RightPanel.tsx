@@ -3,16 +3,20 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { useApp, useActiveWorkspace } from "@/store/app";
+import { useApp, useActiveWorkspace, usePrChecks } from "@/store/app";
 import { useUI } from "@/store/ui";
 import {
   workspaceChanges, workspaceRunScriptStream, workspaceStopScript, openPath, repoConfigLoad,
-  workspaceSpotlightStop, workspaceSpotlightResync,
+  workspaceSpotlightStop, workspaceSpotlightResync, githubPrChecksFetch, githubPrMerge,
 } from "@/lib/ipc";
 import { startSpotlight } from "@/lib/spotlight";
-import type { Changes, Workspace, WorkspaceMember, Project } from "@/lib/types";
+import type { Changes, Workspace, WorkspaceMember, Project, GitHubCheckRun } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { Play, ChevronDown, ChevronUp, ChevronRight, TerminalSquare, Square, Globe, X, Plus, GitBranch, Link2, Wrench, Copy, Check, Settings, AudioWaveform, RefreshCw } from "lucide-react";
+import {
+  Play, ChevronDown, ChevronUp, ChevronRight, TerminalSquare, Square, Globe, X, Plus, GitBranch, Link2, Wrench,
+  Copy, Check, Settings, AudioWaveform, RefreshCw, Loader2, GitPullRequest, GitMerge, CheckCircle2, XCircle, MinusCircle,
+  Circle, ExternalLink, AlertCircle, Clock,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { AuxTerminal } from "./AuxTerminal";
@@ -20,12 +24,20 @@ import { FileTree } from "./FileTree";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { useScriptRuns, useRunState, type RunStatus } from "@/store/scriptRuns";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem } from "@/components/ui/Dropdown";
+import { ghErrorToToastText } from "@/lib/errors";
 
 const STATUS_LABEL: Record<string, string> = { M: "modified", A: "added", D: "deleted", R: "renamed", "??": "untracked", "!!": "ignored", U: "conflict" };
 const STATUS_COLOR: Record<string, string> = { M: "var(--color-accent)", A: "var(--color-ok)", D: "var(--color-err)", R: "var(--color-accent)", "??": "var(--color-ok)", U: "var(--color-err)" };
 const STATUS_CHAR: Record<string, string> = { M: "M", A: "+", "??": "+", D: "D", R: "R", U: "U", "!!": "!" };
 
-type FootTab = "setup" | "run" | "term" | "spotlight";
+// Checks-tab polling cadence (Task 16). 30s relaxed default; 5s aggressive
+// when any check is still in flight. Tightening beyond 5s would hammer the
+// GitHub API for a long-running check; loosening beyond 30s would make the
+// relaxed state feel "stuck" after a check finishes.
+const CHECKS_RELAXED_MS = 30_000;
+const CHECKS_AGGRESSIVE_MS = 5_000;
+
+type FootTab = "setup" | "run" | "term" | "spotlight" | "checks";
 
 // Footer collapse persists across launches. Component-local (no other
 // component reads it) so it's localStorage-backed directly rather than
@@ -139,6 +151,12 @@ export function RightPanel() {
   const footerTerm = useApp(s => (ws ? !!s.footerTerm[ws.id] : false));
   const setupRunState = useRunState(ws?.id, "setup", footTarget);
   const runRunState   = useRunState(ws?.id, "run",   footTarget);
+  // Checks-tab per-status badge (Task 16). Reads the same `usePrChecks`
+  // snapshot ChecksContent writes into. `pr === null` (no PR) reads as
+  // an empty checks list and `checksDotColor` returns null, so the
+  // FTab doesn't show a misleading dot.
+  const prChecks = usePrChecks(ws?.id);
+  const checksDot = ws ? checksDotColor(prChecks.checks) : null;
   // The Setup tab is transient: it only appears once Setup has been
   // invoked for this (workspace, target). Closing it resets the run
   // state back to idle and the tab disappears again.
@@ -234,6 +252,23 @@ export function RightPanel() {
       setFootTab(spotlightAvailable ? "spotlight" : "run");
     }
   }, [showSetupTab, footTab, spotlightAvailable]);
+
+  // ⇧⌘K → switch the footer to the Checks tab. The useShortcuts
+  // handler dispatches `termic-open-checks` (the footTab state is local
+  // to this component, so it can't live in the store). We also expand
+  // the footer so the user immediately sees the tab content; gate on
+  // the dispatched wsId matching the active workspace so a stale event
+  // from a previous activation can't sneak through.
+  useEffect(() => {
+    function onOpenChecks(e: Event) {
+      const detail = (e as CustomEvent<{ wsId: string }>).detail;
+      if (!detail || detail.wsId !== ws?.id) return;
+      setFootTab("checks");
+      setFootCollapsed(false);
+    }
+    window.addEventListener("termic-open-checks", onOpenChecks);
+    return () => window.removeEventListener("termic-open-checks", onOpenChecks);
+  }, [ws?.id]);
 
   if (!ws) return null;
 
@@ -437,16 +472,35 @@ export function RightPanel() {
                       }}
                     />
                   )}
-                  <RunToolbar
-                    ws={syntheticWs} project={memberProject} yamlPreviewUrl={yamlPreviewUrls[m?.project_id ?? ""]}
-                    hasSetup={!!(m?.setup_script?.trim() || memberProject?.setup_script?.trim() || yamlSetupScripts[m?.project_id ?? ""]?.trim())}
-                    setupStatus={setupRunState.status} runStatus={runRunState.status}
-                    compact={footerTerm}
-                    onSetupStart={() => startScript("setup")}
-                    onSetupStop={()  => stopScript("setup")}
-                    onRunStart={()   => startScript("run")}
-                    onRunStop={()    => stopScript("run")}
-                  />
+                  {/* Checks tab for multi-repo: per-workspace branch is
+                      still the host branch (the wrapper), so the
+                      existing single-branch check fetch is correct.
+                      Future multi-branch per-member checks can refine
+                      this (Task 13/16). Tip surfaces the new ⇧⌘K
+                      shortcut per the Task 20 spec. */}
+                  <Tip content="PR + commit checks for this branch (⇧⌘K)" side="bottom">
+                    <FTab
+                      label="Checks"
+                      icon={<GitPullRequest className="h-3 w-3" />}
+                      active={footTab === "checks"}
+                      onClick={() => setFootTab("checks")}
+                      dotColor={checksDot}
+                    />
+                  </Tip>
+                  {footTab === "checks" ? (
+                    <ChecksRefreshButton ws={ws} />
+                  ) : (
+                    <RunToolbar
+                      ws={syntheticWs} project={memberProject} yamlPreviewUrl={yamlPreviewUrls[m?.project_id ?? ""]}
+                      hasSetup={!!(m?.setup_script?.trim() || memberProject?.setup_script?.trim() || yamlSetupScripts[m?.project_id ?? ""]?.trim())}
+                      setupStatus={setupRunState.status} runStatus={runRunState.status}
+                      compact={footerTerm}
+                      onSetupStart={() => startScript("setup")}
+                      onSetupStop={()  => stopScript("setup")}
+                      onRunStart={()   => startScript("run")}
+                      onRunStop={()    => stopScript("run")}
+                    />
+                  )}
                 </div>
               );
             })()}
@@ -503,6 +557,20 @@ export function RightPanel() {
               }}
             />
           )}
+          {/* Checks tab — always present, not gated on showRunTab or
+              spotlight. Each workspace has a branch with a potential
+              PR; surfacing the GitHub status is useful even on
+              spotlight or run-disabled workspaces. Tip surfaces the
+              new ⇧⌘K shortcut per the Task 20 spec. */}
+          <Tip content="PR + commit checks for this branch (⇧⌘K)" side="bottom">
+            <FTab
+              label="Checks"
+              icon={<GitPullRequest className="h-3 w-3" />}
+              active={footTab === "checks"}
+              onClick={() => { setFootTab("checks"); setFootCollapsed(false); }}
+              dotColor={checksDot}
+            />
+          </Tip>
           {/* Right-side controls depend on tab + spotlight state */}
           {footTab === "spotlight" && isSpotlighted ? (
             // Active: Resync + Stop
@@ -533,6 +601,11 @@ export function RightPanel() {
                 Spotlight
               </button>
             </div>
+          ) : footTab === "checks" ? (
+            // Checks refresh button — same affordance as Spotlight's
+            // Resync icon. Disabled while a fetch is in flight (loading
+            // state from the store).
+            <ChecksRefreshButton ws={ws} />
           ) : footTab !== "term" && showRunTab ? (
             <RunToolbar
               ws={ws} project={project} yamlPreviewUrl={yamlPreviewUrls[ws.project_id]}
@@ -584,6 +657,14 @@ export function RightPanel() {
                 />
               );
             })()}
+            {/* Checks content — branch PR + commit check-runs. Fetches
+                on mount and on the manual refresh button; the tab's
+                remount-on-focus is what drives the "on tab focus" fetch
+                (per CLAUDE.md the content is unmounted on tab switch,
+                unlike the AuxTerminal below). */}
+            {footTab === "checks" && (
+              <ChecksContent ws={ws} />
+            )}
             {/* Keep the AuxTerminal mounted whenever the user has enabled
                 it for this workspace, regardless of which tab is currently
                 visible — switching to Setup/Run should NOT respawn the
@@ -607,8 +688,13 @@ export function RightPanel() {
   );
 }
 
-function FTab({ label, icon, active, onClick, onClose }: {
+function FTab({ label, icon, active, onClick, onClose, dotColor }: {
   label: string; icon?: React.ReactNode; active: boolean; onClick: () => void; onClose?: () => void;
+  /** Optional status dot rendered to the right of the label. Drives
+   *  the Checks-tab per-status badge (Task 16). The dot pulses for
+   *  the "warn" / in-flight color so the user notices when a check
+   *  is still running without having to open the tab. */
+  dotColor?: "ok" | "warn" | "err" | null;
 }) {
   return (
     <div
@@ -623,6 +709,7 @@ function FTab({ label, icon, active, onClick, onClose }: {
     >
       <button onClick={onClick} className="flex items-center gap-1 px-1.5 py-1">
         {icon}{label}
+        {dotColor && <ChecksDot color={dotColor} />}
       </button>
       {onClose && (
         <button
@@ -633,6 +720,40 @@ function FTab({ label, icon, active, onClick, onClose }: {
       )}
     </div>
   );
+}
+
+/** Per-status dot for the Checks tab (Task 16). Same shape as the
+ *  footer StatusDot for running scripts but with a third color
+ *  (`warn` for in-flight, `err` for failure, `ok` for green) and a
+ *  pulsing animation on `warn` so the user notices a still-running
+ *  check without opening the tab. Rendered as a span next to the
+ *  tab label so it disappears with the FTab itself. */
+function ChecksDot({ color }: { color: "ok" | "warn" | "err" }) {
+  const bg = color === "ok" ? "var(--color-ok)"
+    : color === "warn" ? "var(--color-warn)"
+    : "var(--color-err)";
+  return (
+    <span
+      data-testid="checks-status-dot"
+      data-status={color}
+      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", color === "warn" && "animate-pulse")}
+      style={{ background: bg }}
+    />
+  );
+}
+
+/** Compute the worst status across the visible checks for the
+ *  Checks-tab badge (Task 16). Precedence: failure > in-flight > done.
+ *  Other conclusions (skipped / neutral / cancelled / timed_out /
+ *  action_required / stale) are treated as "done" (not failing) and
+ *  the badge is green. Returns null when there are no checks to
+ *  evaluate (no PR, or PR has no checks yet) so the FTab doesn't show
+ *  a misleading dot. */
+function checksDotColor(checks: GitHubCheckRun[]): "ok" | "warn" | "err" | null {
+  if (checks.length === 0) return null;
+  if (checks.some(c => c.conclusion === "failure")) return "err";
+  if (checks.some(c => c.status === "in_progress" || c.status === "queued")) return "warn";
+  return "ok";
 }
 
 // Width reserved for the "+N" overflow trigger when some members don't
@@ -1391,6 +1512,448 @@ function SpotlightContent({
           {entry.msg}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ───────────────────────────── Checks tab ─────────────────────────────
+
+/** Refresh button for the Checks tab — same icon + placement as
+ *  Spotlight's Resync. Disabled while a fetch is in flight; the
+ *  `data-testid` is the QA hook the plan spec references. The button
+ *  fires its own one-shot IPC call (not a re-trigger of the polling
+ *  effect) so the user gets an immediate response without waiting
+ *  for the next polling tick. */
+function ChecksRefreshButton({ ws }: { ws: Workspace }) {
+  const data = usePrChecks(ws.id);
+  const loading = data.loading;
+  const handleRefresh = async () => {
+    if (loading) return;
+    useApp.getState().setPrChecksLoading(ws.id, true);
+    try {
+      const bundle = await githubPrChecksFetch(ws.project_id, ws.branch);
+      useApp.getState().setPrChecks(ws.id, { pr: bundle.pr, checks: bundle.checks, error: null });
+    } catch (err) {
+      useApp.getState().setPrChecks(ws.id, { pr: null, checks: [], error: String(err) });
+    }
+  };
+  return (
+    <button
+      data-testid="checks-refresh"
+      onClick={handleRefresh}
+      disabled={loading}
+      title={loading ? "Refreshing checks…" : "Refresh checks"}
+      className={cn(
+        "ml-auto rounded p-1",
+        loading
+          ? "text-[var(--color-fg-faint)] opacity-60 cursor-wait"
+          : "text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+      )}
+    >
+      <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+    </button>
+  );
+}
+
+/** Format an ISO8601 timestamp as a short "Xs ago" / "Xm ago" / "Xh ago"
+ *  relative string for the started_at / completed_at columns. Falls
+ *  back to the raw timestamp if the input is unparseable. */
+function timeAgo(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "—";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  const diff = Math.max(0, Math.floor((now - t) / 1000));
+  if (diff < 60)        return `${diff}s ago`;
+  if (diff < 3600)      return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400)     return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+/** Visual chip for a single check-run: status icon + name + conclusion
+ *  + started/completed ago. The whole row is a link to the run on
+ *  GitHub (via `open_path` — handles URLs as well as filesystem
+ *  paths on macOS). */
+function CheckRunRow({ check }: { check: GitHubCheckRun }) {
+  // Status / conclusion → icon + color. Conclusion is null while the
+  // check is still queued or in progress; show a spinner then.
+  const isDone = check.status === "completed";
+  const conclusion = (check.conclusion ?? "").toLowerCase();
+  let icon: React.ReactNode;
+  let colorClass: string;
+  if (!isDone) {
+    icon = <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+    colorClass = "text-[var(--color-fg-faint)]";
+  } else if (conclusion === "success") {
+    icon = <CheckCircle2 className="h-3.5 w-3.5" />;
+    colorClass = "text-[var(--color-ok)]";
+  } else if (conclusion === "failure") {
+    icon = <XCircle className="h-3.5 w-3.5" />;
+    colorClass = "text-[var(--color-err)]";
+  } else if (conclusion === "skipped" || conclusion === "neutral" || conclusion === "cancelled") {
+    icon = <MinusCircle className="h-3.5 w-3.5" />;
+    colorClass = "text-[var(--color-fg-faint)]";
+  } else {
+    // timed_out, action_required, stale, or anything unexpected.
+    icon = <AlertCircle className="h-3.5 w-3.5" />;
+    colorClass = "text-[var(--color-warn)]";
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => { if (check.html_url) openPath(check.html_url); }}
+      disabled={!check.html_url}
+      title={check.html_url || check.name}
+      className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-[var(--color-hover)] disabled:cursor-default disabled:hover:bg-transparent"
+    >
+      <span className={cn("shrink-0", colorClass)}>{icon}</span>
+      <span className="min-w-0 flex-1 truncate text-[12.5px] text-[var(--color-fg)]">{check.name}</span>
+      <span className="shrink-0 text-[10.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">
+        {isDone ? (conclusion || "completed") : (check.status || "queued")}
+      </span>
+      <span className="flex shrink-0 items-center gap-1 text-[10.5px] text-[var(--color-fg-faint)] tabular-nums">
+        <Clock className="h-2.5 w-2.5" />
+        {isDone && check.completed_at
+          ? `completed ${timeAgo(check.completed_at)}`
+          : `started ${timeAgo(check.started_at)}`}
+      </span>
+      {check.html_url && (
+        <ExternalLink className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)] opacity-0 group-hover:opacity-100" />
+      )}
+    </button>
+  );
+}
+
+/** The Checks tab body: PR header (title + link + branch/state) +
+ *  flat list of check runs, with empty / error states per the plan's
+ *  QA scenarios. Polls with a relaxed/aggressive cadence (Task 16);
+ *  the manual refresh button fires its own one-shot IPC so the user
+ *  gets an immediate response without waiting for the next tick. */
+function ChecksContent({ ws }: { ws: Workspace }) {
+  const data = usePrChecks(ws.id);
+  const setPrChecks = useApp(s => s.setPrChecks);
+  const setPrChecksLoading = useApp(s => s.setPrChecksLoading);
+
+  // ── polling (Task 16) ─────────────────────────────────────────
+  // Self-scheduling timer: after each fetch, decide the next delay
+  // from the result. 5s aggressive while a check is in flight, 30s
+  // relaxed otherwise. `cancelled` is the standard unmount guard;
+  // the timer is cleared in the cleanup so unmounting the Checks
+  // tab (or the whole right panel when switching workspaces) stops
+  // the polling immediately.
+  //
+  // Note: `data.loading` is intentionally NOT in the dep array.
+  // The polling effect's own transitions (loading true→false on
+  // every fetch) would otherwise re-trigger the effect, causing
+  // back-to-back duplicate fetches. The manual refresh button
+  // (`ChecksRefreshButton`) does its own one-shot IPC and updates
+  // the same store slot, so the two paths don't share state.
+  //
+  // Focus-gate: skip the initial mount if this workspace isn't the
+  // active one. The current architecture (RightPanel renders only
+  // for the active workspace) makes this redundant today; the
+  // explicit check mirrors `useAttentionNotifier`'s pattern so a
+  // future change that keeps the RightPanel mounted for inactive
+  // workspaces won't accidentally poll in the background.
+  useEffect(() => {
+    if (useApp.getState().activeWorkspaceId !== ws.id) return;
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      setPrChecksLoading(ws.id, true);
+      try {
+        const bundle = await githubPrChecksFetch(ws.project_id, ws.branch);
+        if (cancelled) return;
+        setPrChecks(ws.id, { pr: bundle.pr, checks: bundle.checks, error: null });
+        // Schedule the next poll: aggressive while any check is in
+        // flight, relaxed otherwise. Errors fall back to relaxed so
+        // we don't hammer a broken IPC.
+        const anyInFlight = bundle.checks.some(
+          c => c.status === "in_progress" || c.status === "queued",
+        );
+        schedule(anyInFlight ? CHECKS_AGGRESSIVE_MS : CHECKS_RELAXED_MS);
+      } catch (err) {
+        if (cancelled) return;
+        setPrChecks(ws.id, { pr: null, checks: [], error: String(err) });
+        schedule(CHECKS_RELAXED_MS);
+      }
+    };
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      timer = window.setTimeout(tick, delay);
+    };
+
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [ws.id, ws.project_id, ws.branch, setPrChecks, setPrChecksLoading]);
+
+  // ── error states ───────────────────────────────────────────────
+  const err = data.error;
+
+  // Task 18: also surface fetch errors as a toast so the user
+  // doesn't miss them if they switched tabs after the fetch
+  // failed. The inline error state below is the primary UI when
+  // the Checks tab is visible; the toast is the fallback for
+  // when the user has navigated elsewhere. Dedup by
+  // `${fetchedAt}:${err}` so we toast exactly once per failed
+  // fetch (not on every re-render). Sits at the top of the
+  // component to obey the rules of hooks.
+  const toastSig = err ? `${data.fetchedAt ?? 0}:${err}` : null;
+  useEffect(() => {
+    if (!toastSig) return;
+    const t = ghErrorToToastText(err!);
+    useUI.getState().pushToast(t.message, t.severity);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toastSig]);
+  if (err) {
+    const code = err.split(":", 1)[0];
+    if (code === "gh_unavailable" || code === "gh_unauthenticated") {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+          <GitPullRequest className="h-10 w-10 text-[var(--color-fg-faint)] opacity-30" />
+          <div className="text-[13.5px] font-medium text-[var(--color-fg)]">
+            Install and authenticate gh
+          </div>
+          <p className="max-w-[36ch] text-[12px] text-[var(--color-fg-faint)]">
+            The Checks tab uses the GitHub CLI to fetch PR status and commit checks.
+            {code === "gh_unauthenticated" ? (
+              <> Run <code className="rounded bg-[var(--color-bg-2)] px-1 py-0.5 font-mono">gh auth login</code> in a terminal to authenticate.</>
+            ) : (
+              <> Install the <code className="rounded bg-[var(--color-bg-2)] px-1 py-0.5 font-mono">gh</code> CLI (e.g. <code className="font-mono">brew install gh</code>) and run <code className="font-mono">gh auth login</code>.</>
+            )}
+          </p>
+          <Button size="sm" variant="secondary" onClick={() => {
+            useApp.getState().setPrChecksLoading(ws.id, true);
+          }} className="gap-1.5">
+            <RefreshCw className="h-3 w-3" /> Try again
+          </Button>
+        </div>
+      );
+    }
+    if (code === "rate_limited") {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+          <GitPullRequest className="h-10 w-10 text-[var(--color-fg-faint)] opacity-30" />
+          <div className="text-[13.5px] font-medium text-[var(--color-fg)]">
+            GitHub API rate limit hit
+          </div>
+          <p className="max-w-[40ch] text-[12px] text-[var(--color-fg-faint)]">
+            Try again in a few minutes.
+          </p>
+          <Button size="sm" variant="secondary" onClick={() => {
+            useApp.getState().setPrChecksLoading(ws.id, true);
+          }} className="gap-1.5">
+            <RefreshCw className="h-3 w-3" /> Try again
+          </Button>
+        </div>
+      );
+    }
+    // Unknown error code — show a generic fallback + toast.
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <AlertCircle className="h-10 w-10 text-[var(--color-err)] opacity-60" />
+        <div className="text-[13.5px] font-medium text-[var(--color-fg)]">
+          Could not load checks
+        </div>
+        <p className="max-w-[44ch] break-words text-[12px] text-[var(--color-fg-faint)]">
+          {err}
+        </p>
+        <Button size="sm" variant="secondary" onClick={() => {
+          useApp.getState().setPrChecksLoading(ws.id, true);
+        }} className="gap-1.5">
+          <RefreshCw className="h-3 w-3" /> Try again
+        </Button>
+      </div>
+    );
+  }
+
+  // ── loading state (no data yet) ────────────────────────────────
+  if (data.loading && data.fetchedAt === null) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-[var(--color-fg-faint)]" />
+      </div>
+    );
+  }
+
+  // ── empty state — branch has no PR ─────────────────────────────
+  // The "Create PR" button is the natural "next action" after the
+  // user sees there's no PR for the branch. Hidden for non-git
+  // projects (`gh pr create` requires a branch) and for repo-root
+  // workspaces (Task 13 / 16 may add a different flow for those).
+  if (!data.pr) {
+    const project = useApp.getState().projects.find(p => p.id === ws.project_id);
+    const canCreatePr = !project?.non_git && !ws.is_repo_root;
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <GitPullRequest className="h-10 w-10 text-[var(--color-fg-faint)] opacity-30" />
+        <div className="text-[13.5px] font-medium text-[var(--color-fg)]">
+          No PR or checks found for this branch
+        </div>
+        <p className="max-w-[40ch] text-[12px] text-[var(--color-fg-faint)]">
+          Push this branch and open a pull request on GitHub to see status checks here.
+        </p>
+        <p className="text-[11px] text-[var(--color-fg-faint)]">
+          Branch: <code className="font-mono">{ws.branch}</code>
+        </p>
+        {canCreatePr && (
+          <Tip content="Open the PR-create dialog for this workspace (⇧⌘P)" side="top">
+            <Button
+              size="sm"
+              variant="secondary"
+              data-testid="checks-create-pr"
+              onClick={() => useUI.getState().openPrCreate(ws.id)}
+              className="gap-1.5"
+            >
+              <GitPullRequest className="h-3 w-3" />
+              Create PR
+            </Button>
+          </Tip>
+        )}
+      </div>
+    );
+  }
+
+  // ── success — PR header + checks list ──────────────────────────
+  const pr = data.pr;
+  const isDraft = pr.draft;
+  const isOpen = pr.state.toLowerCase() === "open";
+  // ── Merge-button gating (Task 13) ─────────────────────────────
+  // Enabled iff:
+  //   - pr.draft === false (drafts can't be merged)
+  //   - pr.checks_passing === true (all required checks green)
+  //   - no check is currently in flight (queued / in_progress)
+  // The Rust side validates `pr_number > 0` and the method, but the
+  // UI does the green-checks gate so the user gets an explanation
+  // rather than "gh: pull request N is not mergeable".
+  const [merging, setMerging] = useState(false);
+  const anyCheckInFlight = data.checks.some(c => c.status === "in_progress" || c.status === "queued");
+  // Disabled-reason precedence (most specific first): a draft is the
+  // most permanent reason (the user has to mark it ready), an
+  // in-flight check is more actionable than "checks failing" (the
+  // user is one wait away from a green build), and "waiting for
+  // checks" comes before "checks failing" because the latter only
+  // applies when there IS a check result to look at.
+  const mergeDisabledReason: string | null = isDraft
+    ? "PR is a draft"
+    : anyCheckInFlight
+    ? "Checks running"
+    : pr.checks_passing === null
+    ? "Waiting for checks"
+    : pr.checks_passing === false
+    ? "Checks failing"
+    : null;
+  const mergeEnabled = mergeDisabledReason === null;
+  const handleMerge = async () => {
+    if (!mergeEnabled || merging) return;
+    const ok = await useUI.getState().askConfirm({
+      title: "Merge pull request",
+      message: `Merge PR #${pr.number} into ${pr.base_ref}? The head branch will be deleted.`,
+      confirmLabel: "Merge",
+      // Not destructive — merging is a normal, recoverable action
+      // (the PR can be reverted, the branch recreated from the merge
+      // SHA). No red ring.
+    });
+    if (!ok) return;
+    setMerging(true);
+    try {
+      await githubPrMerge({ projectId: ws.project_id, prNumber: pr.number, method: "squash" });
+      useUI.getState().pushToast(`PR #${pr.number} merged`, "success");
+      // Re-fetch so the post-merge state (PR closed, checks gone,
+      // branch gone) replaces the snapshot the user just acted on.
+      // Same loading-flag-bump pattern the refresh button uses.
+      setPrChecksLoading(ws.id, true);
+    } catch (err) {
+      // Task 18: route the gh error through the helper so the
+      // user gets the same friendly text on the merge toast as
+      // they would on the fetch error path (and on the issue
+      // import + PR create dialogs). `gh_error:` falls through
+      // to the raw stderr text per the helper's spec.
+      const t = ghErrorToToastText(String(err));
+      useUI.getState().pushToast(t.message, t.severity);
+    } finally {
+      setMerging(false);
+    }
+  };
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      {/* PR header — clickable title links to the PR on GitHub. */}
+      <button
+        type="button"
+        onClick={() => openPath(pr.html_url)}
+        className="group flex shrink-0 items-start gap-2 border-b border-[var(--color-border-soft)] px-3 py-2 text-left hover:bg-[var(--color-hover)]"
+      >
+        <GitPullRequest
+          className={cn(
+            "mt-0.5 h-4 w-4 shrink-0",
+            isDraft ? "text-[var(--color-fg-faint)]"
+              : isOpen ? "text-[var(--color-ok)]"
+              : "text-[var(--color-fg-faint)]",
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-[12.5px] font-medium text-[var(--color-fg)]">
+            <span className="truncate">{pr.title}</span>
+            <span className="shrink-0 text-[var(--color-fg-faint)]">#{pr.number}</span>
+            {isDraft && (
+              <span className="shrink-0 rounded bg-[var(--color-warn)]/15 px-1.5 py-0.5 text-[9.5px] uppercase tracking-wider text-[var(--color-warn)]">draft</span>
+            )}
+          </div>
+          <div className="mt-0.5 truncate text-[10.5px] text-[var(--color-fg-faint)]">
+            <code className="font-mono">{pr.head_ref}</code> → <code className="font-mono">{pr.base_ref}</code>
+          </div>
+        </div>
+        <ExternalLink className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] opacity-0 group-hover:opacity-100" />
+      </button>
+      {/* Merge action bar — gated on green checks + non-draft + no
+          in-flight checks. Tooltip carries the disabled reason so
+          the user understands WHY the button is grey. Method is
+          fixed to "squash" for the MVP — the IPC supports all three
+          (`merge` / `squash` / `rebase`), and a method picker can
+          land in a follow-up task. */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border-soft)] px-3 py-2">
+        <div className="text-[11.5px] text-[var(--color-fg-faint)]">
+          {data.checks.length === 0
+            ? "No checks reported"
+            : mergeEnabled
+            ? "All checks passed"
+            : mergeDisabledReason}
+        </div>
+        <Tip
+          content={mergeEnabled ? `Squash and merge PR #${pr.number}` : mergeDisabledReason ?? ""}
+          side="top"
+        >
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={handleMerge}
+            disabled={!mergeEnabled || merging}
+            data-testid="checks-merge"
+            className="ml-auto h-6 gap-1 px-2 text-[12px]"
+          >
+            {merging
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <GitMerge className="h-3 w-3" />}
+            {merging ? "Merging…" : "Merge"}
+          </Button>
+        </Tip>
+      </div>
+      {/* Checks list */}
+      <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
+        {data.checks.length === 0 ? (
+          <div className="px-2 py-3 text-[12px] text-[var(--color-fg-faint)]">
+            No checks yet — GitHub will report status as the workflows run.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-0.5">
+            {data.checks.map(c => <CheckRunRow key={c.id} check={c} />)}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

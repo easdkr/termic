@@ -1,0 +1,92 @@
+# Task 13 — PR view and merge UI
+
+**Date:** 2026-06-07
+**Status:** DONE — backend IPC + UI gating + confirmation dialog + Rust unit test + build clean
+**Spec:** `.omo/plans/termic-vs-conductor.md` lines 497-520
+**Acceptance criteria:** see "Acceptance Criteria" below — all met.
+
+## What was added
+
+### Rust backend (`src-tauri/src/lib.rs`)
+
+- `validate_pr_merge_method(method: &str) -> Result<&str, String>` — pure function. Rejects anything outside `{ "merge", "squash", "rebase" }` (after trim) with an error that names the bad input AND lists the allowed set. Defense-in-depth at the IPC boundary: `Command::args` doesn't go through a shell, but refusing unknown strings here gives a clearer error than `gh`'s "unknown flag" response.
+- `github_pr_merge_blocking(project_id, pr_number, method) -> Result<String, String>` — loads the project by id, resolves its `root_path`, validates `pr_number > 0` (rejects 0 explicitly so the user gets a clean error instead of `gh`'s "no pull request matches the search"), then shells out to `gh pr merge <n> --<method> --delete-branch`. Always passes `--delete-branch` — the user's whole point of merging is to land the work, and a merged branch is dead weight in the remote. Returns the trimmed stdout ("Merged pull request #N" or similar). Reuses `classify_gh_error` for the standard error prefixes (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` / `gh_error`).
+- `#[tauri::command] async fn github_pr_merge(project_id, pr_number, method) -> Result<String, String>` — IPC entry. `async` + `tauri::async_runtime::spawn_blocking` per the long-running-IPC discipline — the merge itself can take a few seconds (GitHub has to fast-forward / squash / rebase), and the user might trigger it on a slow network.
+- Wired in `invoke_handler` next to `github_pr_create`.
+- 1 new unit test (93 total, all pass): `validate_pr_merge_method_accepts_documented_set` — 3 positive (exact match), 4 positive (whitespace tolerance — paste-from-clipboard), 6 negative (empty, wrong case, unknown methods, `--delete-branch` flag-shaped). Asserts the error message names "Invalid merge method" AND lists the full allowed set in every rejection.
+
+### TS frontend
+
+**`src/lib/ipc.ts`:** Added `githubPrMerge({ projectId, prNumber, method }) => invoke<string>("github_pr_merge", { projectId, prNumber, method })`. The `method` field is typed `"merge" | "squash" | "rebase"` so the TS surface documents the valid set (the Rust validator is still the authoritative gate).
+
+**`src/components/workspace/RightPanel.tsx`:**
+- `githubPrMerge` added to the `import { ... } from "@/lib/ipc"` block.
+- `GitMerge` added to the `lucide-react` import block.
+- `ChecksContent` (Task 8 component) extended with the merge action bar between the PR header and the checks list:
+  - `useState` for the in-flight `merging` flag (drives the spinner + disables the button).
+  - `anyCheckInFlight` derived from `data.checks` — true when any check is `status === "in_progress"` or `"queued"`.
+  - `mergeDisabledReason` — single source of truth for the disabled tooltip. Precedence: `PR is a draft` → `Checks running` → `Waiting for checks` → `Checks failing`. The first match wins; mutiple overlapping conditions pick the most actionable.
+  - `mergeEnabled = mergeDisabledReason === null` — enabled iff `!isDraft && pr.checks_passing === true && !anyCheckInFlight`.
+  - `handleMerge` — opens `useUI.askConfirm` (the existing global confirm modal from Task 7); if confirmed, calls `githubPrMerge` with `method: "squash"`. On success: `pushToast("PR #N merged", "success")` + `setPrChecksLoading(ws.id, true)` to re-fetch (the `ChecksContent` effect's `data.loading` dep picks up the flag flip and re-fires the fetch). On error: `pushToast` with the error message + toast `kind` mapped from the stable error-code prefix (`gh_unauthenticated` / `gh_unavailable` → `info`, anything else → `error`).
+  - The button itself: `<Button variant="primary" disabled={!mergeEnabled || merging}>` with a `<Tip>` carrying the disabled reason. `data-testid="checks-merge"` for QA. Spinner icon (`<Loader2 className="animate-spin">`) when `merging`; `<GitMerge>` icon otherwise. Label: "Merging…" or "Merge".
+  - Left side of the bar: short status text. "All checks passed" when enabled, the disabled reason when disabled, "No checks reported" when there are zero checks. Mirrors the tooltip so the user sees the same info without hovering.
+
+## Verification
+
+### `cargo check` — clean
+
+```
+$ cargo check --manifest-path src-tauri/Cargo.toml
+    Checking termic v0.8.2 (/Users/june/workspace/personal/termic/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.08s
+```
+
+### `cargo test --lib` — 93/93 pass, including 1 new one
+
+```
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib validate_pr_merge_method
+test tests::validate_pr_merge_method_accepts_documented_set ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 92 filtered out; finished in 0.00s
+
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib
+test result: ok. 93 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+```
+
+### `npm run build` — clean
+
+```
+$ npm run build
+> termic@0.8.2 build
+> tsc -b && vite build
+
+vite v8.0.13 building client environment for production...
+✓ 1812 modules transformed.
+✓ built in 377ms
+```
+
+## Acceptance Criteria (from plan)
+
+- [x] Merge button disabled until checks green, enabled when all required checks pass — `mergeEnabled` requires `pr.checks_passing === true`, the green signal Task 8's wire struct already encodes.
+- [x] "Checks failing" disabled state visible on a red check — `mergeDisabledReason` resolves to `"Checks failing"` when `pr.checks_passing === false`; the tooltip + the left-side status text both surface it.
+- [x] Success toast on merge — `pushToast("PR #N merged", "success")` after a successful `githubPrMerge` call.
+- [x] Confirmation dialog before merge — `useUI.askConfirm` with the title "Merge pull request", the message "Merge PR #N into <base>? The head branch will be deleted.", and the confirm label "Merge". Not destructive (no red ring) — merging is a normal, recoverable action.
+
+## QA Scenarios — verification approach
+
+The plan's QA scenarios require a live `gh` install + a real PR. Same as Task 8, this is a backend + UI task (per the task spec) — no Playwright run. Verification approach:
+
+1. **Scenario: "Merge enabled on green checks"**
+   - **Gating branch:** `mergeEnabled = !isDraft && pr.checks_passing === true && !anyCheckInFlight`. The `data-testid="checks-merge"` button reads `disabled={!mergeEnabled || merging}`. With `pr.checks_passing === true` and `pr.draft === false` and no in-flight checks, `mergeEnabled` is `true` and the button is enabled.
+   - **Click path:** `onClick={handleMerge}` → `useUI.askConfirm({...})` returns the user's choice → on confirm, `githubPrMerge({ ..., method: "squash" })` → `pushToast(`PR #${pr.number} merged`, "success")` → `setPrChecksLoading(ws.id, true)` to re-fetch.
+   - **Code pin:** the `mergeEnabled` derivation is the only thing the UI checks before opening the confirm; the button's `disabled` prop is derived from it.
+   - **Backend pin:** `validate_pr_merge_method` accepts `"squash"` (positive case in the test). `github_pr_merge_blocking` shells out with `gh pr merge <n> --squash --delete-branch` — the exact `gh` invocation the spec mandates.
+
+2. **Scenario: "Merge blocked on red checks"**
+   - **Gating branch:** with `pr.checks_passing === false`, the precedence chain hits the `pr.checks_passing === false` arm of `mergeDisabledReason`, which returns `"Checks failing"`. `mergeEnabled` is `false`, so the button is `disabled`.
+   - **Tooltip pin:** the `<Tip content={mergeEnabled ? ... : mergeDisabledReason ?? ""}>` wrapping the button carries exactly "Checks failing" when the disabled reason is that string. The plan's QA scenario asserts the tooltip text is "Checks failing" — the code produces exactly that string.
+   - **Visual pin:** the left-side status text shows "Checks failing" too (not just the tooltip), so the disabled state is visible at a glance without a hover.
+   - **Edge case pin:** if a check is BOTH failing and in-flight (e.g. a red check that was retried), the precedence picks `"Checks running"` (more actionable — the user is one wait away from green), not `"Checks failing"`. Pinned by the precedence order in the inline comment.
+
+3. **No regression.** All 93 tests pass (the 92 pre-existing + 1 new), so no other behavior was broken by the new code.
+
+The evidence at `.omo/evidence/task-13-merge-green.png` (per the plan spec) is not required for this task — the spec itself notes "This is a backend + UI task, not a Playwright run; instead, write `.omo/evidence/task-13-merge-green.txt` with build + cargo check + test output." Done above.

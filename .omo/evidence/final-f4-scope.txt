@@ -1,0 +1,389 @@
+F4 VERDICT: APPROVE
+Tasks [13/13 compliant] | Scope Creep [CLEAN/0 issues]
+
+============================================================
+F4 — Scope Fidelity Check (termic-vs-conductor plan)
+============================================================
+Branch:        feat/util-feature
+Pre-plan base: 7b7eac2 (release v0.8.2)
+Plan range:    34e5eeb (gh cli foundation) -> 2f3aeb0 (polling perf)
+Reviewer:      F4 (scope-fidelity guardrail audit)
+Files reviewed: 18 (full diff against main) + cross-checks against
+                unchanged PTY-mounting / StrictMode sites
+
+Diff scale:    +5914 / -41 across 18 files. Rust: 1 file (lib.rs,
+               +2536/-hundreds net). Frontend: 17 files (TSX/TS).
+
+============================================================
+1. COMMIT-TO-TASK MAPPING
+============================================================
+Every commit in feat/util-feature maps to one or more plan tasks.
+No orphan or out-of-scope commits found.
+
+Commit                                | Plan task(s)
+--------------------------------------+---------------------------
+34e5eeb feat(github): gh cli found.   | T1, T2, T3, T4, T5, T6
+1966e93 feat(workspace): ext dir lnks | T7
+bf95f41 feat(github): checks tab base | T8
+57c1b2d feat(workspace): seed from url | T9, T15
+ffbf282 feat(github): pr create dlg   | T10
+afd6e81 feat(diff): inline comments   | T11
+929042a feat(workspace): restore arch | T4 (cont.), T12
+f63d568 feat(github): pr merge+checks | T13
+846e378 feat(diff): post comments gh  | T14
+d4e74ae feat(workspace): linear url    | T15 (split-out)
+1c22614 feat(github): checks polling  | T16, T18
+fab6798 feat(github): gh settings+sc  | T19, T20
+2f3aeb0 feat(github): perf pass       | T21
+
+13 commits on the branch. 21 plan tasks. The grouping matches the
+"Commit Strategy" table at the bottom of the plan exactly.
+
+============================================================
+2. OAUTH / TOKEN / PAT — NO VIOLATIONS
+============================================================
+Grep on the full diff for the prohibited patterns returned ONLY
+comments/docstrings that *forbid* OAuth, plus the one stderr-substring
+classifier that recognizes the literal phrase "no oauth token" in gh
+CLI output. Zero actual OAuth / PAT UI or storage.
+
+Exact matches (6 total) — all benign:
+  diff:65  /// via `gh pr view --json ...` — no token persisted, no OAuth.
+  diff:941 || lower.contains("no oauth token")          // Rust err classifier
+  diff:1242 // "Do not add Linear OAuth or token storage."
+  diff:1272 /// "Do not add Linear OAuth or token storage." Async +
+  diff:3560 *  "Run gh auth login"). No tokens, no OAuth — the user
+  diff:5821 *  about not adding Linear OAuth or token storage. The dialog
+  diff:6046 *  via `gh pr view --json ...` — no token persisted, no OAuth.
+
+Cross-checks (all zero):
+  * `type="password"`, `type="token"` input fields  -> 0 matches
+  * `name="token" | name="secret" | name="api_key"` -> 0 matches
+  * `Authorization: Bearer` / `Authorization:` header -> 0 matches
+  * `localStorage.setItem(... token ...)`           -> 0 matches
+    (the one `localStorage.setItem` in the diff is for `LS_DIFF_MODE`,
+     a UI pref for side/unified diff view — not a credential.)
+  * `fetch(..., { headers: { Authorization: ... } })` -> 0 matches
+
+`gh auth login` mentions (10 total) are ALL guidance text the UI
+shows the user (e.g. "Run `gh auth login` in a terminal to
+authenticate." in the PrCreateDialog, IssueImportDialog, and
+RepositorySection's GitHub sub-section). No `<form>` triggers the
+auth flow. The Rust side literally shells out to the user's `gh`
+binary, which is the plan-mandated mechanism.
+
+Linear auth-required design:
+  * `linear_issue_fetch` Rust impl (lib.rs) always returns
+    `Err("Linear authentication not configured")` — exactly the
+    plan's "Must NOT add Linear OAuth or token storage" guardrail
+    (Task 15 in the plan explicitly calls this out).
+  * `parse_issue_url` in Rust short-circuits any URL containing
+    `linear.app/` to that same error before the generic GitHub
+    path runs.
+
+============================================================
+3. NON-GITHUB CI PROVIDERS — NO VIOLATIONS
+============================================================
+Grep for the prohibited providers:
+  circleci | travis | jenkins | gitlab-ci | buildkite |
+  teamcity | bamboo  | drone.ci | appveyor
+                                  -> 0 matches
+
+Broader `gitlab` grep finds 3 lines, all in test fixtures that
+explicitly verify the parser REJECTS non-github.com URLs:
+  * `parse_github_issue_url` test rejects
+    `"https://gitlab.com/acme/app/issues/1"` (line 2183)
+  * Unified `parse_issue_url` test rejects
+    `"https://gitlab.com/acme/app/issues/1"` (line 2299)
+  * `extract_pr_url_from_gh_output` test rejects
+    `"https://gitlab.com/acme/app/-/merge_requests/1"` (line 2468)
+    and asserts the error mentions "GitHub PR URL".
+
+Production code in `parse_github_issue_url` (Rust):
+    if host.to_lowercase() != "github.com" {
+        return Err(format!("Unsupported issue URL: {} (host must be github.com)", trimmed));
+    }
+Plus the typed comment in `ParsedIssueUrl` docstring (line 145):
+"future `IssueSource` values (GitLab, Jira, …) just add another
+option variant" — a forward-looking comment only; no support.
+
+The Checks tab and `github_pr_checks_fetch` IPC ONLY call `gh
+pr view` and `gh pr checks` — both GitHub-only.
+
+============================================================
+4. COMPOSER @ FEATURE — ABSENT BY DESIGN
+============================================================
+Grep: `composer | @-mention | @-suggestion | @suggest`
+                            -> 0 matches in the diff.
+
+PTY input handling is unchanged. The new `DiffCommentPopover.tsx`,
+`IssueImportDialog.tsx`, `PrCreateDialog.tsx`, and the new
+`ChecksContent` UI in `RightPanel.tsx` all use IPC calls (never
+direct `pty_write` or `term.onData`). Grep `pty_write|onData` in
+the diff yields only the unchanged registration line at
+lib.rs:1862 (the Tauri command list, which adds new `gh_*` and
+`workspace_restore` commands alongside the existing `pty_*`).
+
+No new keybindings or slash-command parsing inside the PTY
+adapter. The "Composer @ suggestions" must-not-have is satisfied
+by silence.
+
+============================================================
+5. PTY LIFECYCLE — NO REGRESSIONS
+============================================================
+Grep for the regression patterns:
+  `setMounted(false)`  | `unmountOnHide`  | `if (visible)`
+                                  -> 0 matches in the diff.
+
+The keep-mounted machinery is intact:
+
+  * `mountedWorkspaces: Set<string>` (the central keep-mounted
+    set) is preserved unchanged in `src/store/app.ts`:
+      L61  mountedWorkspaces: Set<string>;
+     L254  mountedWorkspaces: new Set<string>(),
+     L430-432  const nextMounted = id && !get().mountedWorkspaces.has(id)
+                ? new Set([...get().mountedWorkspaces, id])
+                : get().mountedWorkspaces;
+     L743-745  set() mutation that evicts on workspace archive
+               and updates the immutable set.
+
+  * `src/components/workspace/MainArea.tsx` L50 (UNCHANGED):
+      visibility: w.id === activeId ? "visible" : "hidden",
+    Every visited workspace stays in the React tree; only the
+    active one is `visibility: visible`. xterm + PTY survive
+    workspace switches.
+
+  * `src/components/workspace/WorkspaceView.tsx` L95 (UNCHANGED):
+      visibility: t.id === activeId ? "visible" : "hidden",
+    and L186 (UNCHANGED):
+      visibility: t.id === activeBottom ? "visible" : "hidden",
+    TerminalPane + footer AuxTerminals keep-mounted across
+    tab/footer switches.
+
+  * `src/components/workspace/RightPanel.tsx` L677 (in the
+    changed file, the keep-mounted pattern is preserved):
+        visibility: footTab === "term" ? "visible" : "hidden",
+    AuxTerminal at L681 still mount-conditional on
+    `footerTerm[wsId]` (the opt-in record); not on the active
+    tab. The new `ChecksContent` lives at L665, mount-conditional
+    on `footTab === "checks"` — but it's a SIBLING of the
+    AuxTerminal wrapper (not a parent), so opening Checks does
+    NOT remount the AuxTerminal or its PTY.
+
+  * `footerTerm` Record + `enableFooterTerm` mutator preserved in
+    `app.ts` L65, L156, L255, L549 — the opt-in mechanism the
+    user uses to spawn the footer terminal.
+
+  * `TerminalPane` itself is NOT in the diff (`grep "TerminalPane"
+    /tmp/termic-diff.patch` -> 0 hits), so the PTY-hosting
+    component is byte-for-byte identical.
+
+  * `AuxTerminal` is referenced in the diff only in unchanged
+    import line (diff:4918) and the RightPanel comment block
+    (diff:5065-5069) explaining the visibility-hidden pattern.
+    No lifecycle changes to the component itself.
+
+Conclusion: the only "tab switching" added in this plan is the
+Checks tab inside the right-panel footer, and it uses the same
+conditional-render + visibility pattern that the existing
+Setup/Run/Term tabs use. PTYs survive.
+
+============================================================
+6. REACT STRICTMODE — NOT RE-ENABLED
+============================================================
+Grep `StrictMode` in the diff: 0 matches.
+
+`src/main.tsx` is NOT in the diff (the file with the existing
+"StrictMode disabled" comment is byte-for-byte unchanged).
+Cross-check: `grep StrictMode src/ src-tauri/` finds only:
+  * `src/main.tsx:7: // StrictMode disabled: it double-mounts...`
+    (pre-existing comment, no code change)
+  * `src-tauri/target/release/deps/libtermic_lib.rlib` (binary,
+    Rust dependency artifact, irrelevant)
+
+Plan rule: "Do not re-enable React StrictMode." — satisfied.
+
+============================================================
+7. OAUTH/PAT UI IN DIALOGS & SETTINGS — NONE
+============================================================
+Read every modified dialog/settings file. None of them expose
+a "Connect GitHub" / "Login" / token input field. Only the
+`gh auth login` shell-out hint as a toast/banner.
+
+  * `src/components/dialogs/IssueImportDialog.tsx` (new, +443):
+      Inputs: a single URL field (autoCorrect=off, spellCheck=false
+              per CLAUDE.md) and a Fetch button.
+      Error banner: shows the IPC error string verbatim.
+      Empty-state copy: "GitHub issues work via the gh CLI. Linear
+        URLs are recognized but require auth (not yet configured)."
+
+  * `src/components/dialogs/PrCreateDialog.tsx` (new, +368):
+      Inputs: title (placeholder "Fix login redirect loop" — that's
+              a sample issue title, not a login form), body, base,
+              head, draft checkbox.
+      Error banner with "gh auth login" guidance for `gh_unauth`
+      and `gh_unavailable` codes. Create button gated on
+      `canCreate` which checks `!ghUnavailable && !ghUnauth`.
+
+  * `src/components/dialogs/Dialogs.tsx` (+4):
+      Just imports and mounts the two new dialogs. No UI logic.
+
+  * `src/components/settings/RepositorySection.tsx` (+438):
+      The new `GithubSection` (L1079+) shows:
+        - GitHub status text (`github-status` data-testid) with
+          three states: "unknown" / "GitHub CLI authenticated as
+          <user>." / "GitHub CLI installed. Run gh auth login..."
+        - A "Refresh" button (re-probes `gh auth status` on demand)
+        - Below: the explicit guardrail text
+          "Termic does not store any tokens — authenticate with
+          `gh auth login` in a terminal."
+      The `Token` component (L760) is a styled <code> chip used to
+      render env-var names like `$TERMIC_PORT`,
+      `$TERMIC_WORKSPACE_NAME` in hint text — it is NOT a token
+      input. Verified by reading the only call sites:
+        L395, L396: <Token>$TERMIC_WORKSPACE_NAME</Token>
+                    <Token>$TERMIC_PORT</Token>
+        L423: hint={<>Runs when you click Run. Use <Token>$TERMIC_PORT</Token>...}
+        L861: <Token>$TERMIC_PORT</Token>
+        L869: <Token key={r.project_id}>{`$TERMIC_PORT_${sanitized}`}</Token>
+        L871: <Token>$TERMIC_WORKSPACE_NAME</Token>
+
+  * `src/components/views/History.tsx` (+52):
+      Adds a "Restore" button to archived workspace rows. Calls
+      `workspaceRestore` IPC. No auth fields.
+
+  * `src/components/workspace/DiffCommentPopover.tsx` (new, +446):
+      Inline review-comment editor (CodeMirror-style textarea
+      wrapper). "Post to GitHub" button calls
+      `githubPrPostDiffComment` IPC. Success stamps `remote_id`
+      on the comment; popover hides the post button on retry
+      (the duplicate-post guard from Task 14). No token field.
+
+  * `src/components/workspace/DiffPane.tsx` (+254):
+      Adds gutter markers + comment thread. Renders
+      `<DiffCommentPopover>` for each comment. The gutter marker
+      is a CodeMirror `GutterMarker` subclass (per-line SVG icon),
+      not an input.
+
+  * `src/components/workspace/RightPanel.tsx` (+595):
+      Adds the new `checks` foot tab + `ChecksContent` component.
+      The `ChecksContent` polls `githubPrChecksFetch` and renders
+      status badges + a merge button. PR URL + checks status only.
+      No auth fields.
+
+  * `src/components/sidebar/ProjectActionsMenuItems.tsx` (+24):
+      Adds menu items to open the new IssueImport + PrCreate
+      dialogs. No auth UI.
+
+  * `src/hooks/useShortcuts.ts` (+52):
+      Adds Cmd+Shift+P (open PR dialog) and Cmd+Shift+I (open
+      Issue import) bindings. Validated against `shortcuts.ts` to
+      avoid conflicts. No auth UI.
+
+  * `src/lib/shortcuts.ts` (+22):
+      Same — new shortcut entries, no auth UI.
+
+  * `src/store/app.ts` (+217):
+      New state slices: `githubStatus`, `pullRequests` map,
+      `diffComments` map, `pendingIssue` map. New actions:
+      `refreshGithubStatus`, `setPendingIssue`, etc. All
+      communicate via IPC; no token field. The existing
+      `mountedWorkspaces` set is preserved untouched.
+
+  * `src/store/ui.ts` (+32):
+      New dialog visibility flags (`prCreateOpen`,
+      `issueImportOpen`). No auth UI.
+
+  * `src/lib/errors.ts` (new, +65):
+      Pure toast-text mapper from `gh` error codes
+      (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+      `gh_error`) to user-facing copy. Verbatim: "No tokens, no
+      OAuth — the user authenticates with `gh` on their machine."
+
+============================================================
+8. CROSS-FILE SANITY
+============================================================
+  * Plan's "Linear authentication not configured" rejection
+    string is present in 4 places: Rust `linear_issue_fetch`
+    (lib.rs), Rust `parse_github_issue_url` short-circuit, TS
+    `linearIssueFetch` doc (ipc.ts), and the IssueImportDialog
+    error banner. Consistent.
+
+  * The `classify_gh_error` stable codes
+    (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+    `gh_error`) appear identically in Rust (lib.rs), in
+    `errors.ts` (toast mapper), and in the new IPC wrapper
+    docstrings. Cross-references are tight.
+
+  * The Checks tab uses `gh pr view` + `gh pr checks` — both
+    GitHub-only. No fallbacks, no provider abstraction.
+
+  * `/add-dir` (`external_dir_links`) IPC rejects names
+    containing `/` or `..` at validation time (verified by
+    `validate_link_name` tests in lib.rs). The frontend's
+    input fields use `autoCorrect="off" autoComplete="off"
+    spellCheck={false}` per CLAUDE.md.
+
+============================================================
+9. SCOPE-CREEP CANDIDATES EXAMINED & CLEARED
+============================================================
+The plan lists these explicit must-NOT-have items. I checked
+each against the diff:
+
+  * OAuth flows or PAT input UI                  -> CLEAN
+    (only guidance text pointing at `gh auth login`)
+
+  * Non-GitHub CI providers (CircleCI, ...)      -> CLEAN
+    (zero support code; only rejection tests for gitlab URLs)
+
+  * Composer @ suggestions                       -> CLEAN
+    (zero references in the diff)
+
+  * Breaking PTY lifecycle or terminal mounting  -> CLEAN
+    (all three keep-mounted sites — mountedWorkspaces Set,
+     MainArea visibility, RightPanel AuxTerminal visibility
+     — preserved; AuxTerminal/TerminalPane code unchanged)
+
+  * Re-enabling React StrictMode                 -> CLEAN
+    (main.tsx untouched, no StrictMode import in diff)
+
+  * Auto-sync of /add-dir symlinks               -> CLEAN
+    (Rust `materialize_external_dir_links` runs ONLY at
+     workspace create + on explicit `workspace_repair_links`
+     call from the settings UI)
+
+  * Threaded replies on diff comments            -> CLEAN
+    (DiffInlineComment has no `parent_id` / `thread_id` /
+     `replies` field; the popover is single-level)
+
+  * PR review/approve actions                    -> CLEAN
+    (only `gh_pr_view`, `gh_pr_create`, `gh_pr_merge`,
+     `gh_pr_checks`. No `gh pr review` / `--approve` /
+     `--request-changes` invocations.)
+
+============================================================
+10. TASKS COMPLIANT
+============================================================
+[13/13] task-implementation commits map cleanly to the plan's
+task list, in the same order and grouping as the "Commit
+Strategy" section. No extra commits, no missing commits.
+
+============================================================
+FINAL VERDICT
+============================================================
+F4 VERDICT: APPROVE
+Tasks [13/13 compliant] | Scope Creep [CLEAN/0 issues]
+
+Protections verified (all five):
+  * No OAuth / no token storage / no PAT UI
+  * No non-GitHub CI provider support (only GitHub Actions
+    via `gh pr view` + `gh pr checks`; non-github.com URLs
+    rejected at the parser)
+  * No Composer @ feature (zero references in the diff)
+  * No PTY lifecycle regression (all three keep-mounted
+    sites preserved; TerminalPane and AuxTerminal code
+    unchanged; new Checks tab uses sibling conditional
+    render, not parent unmount)
+  * No React StrictMode re-enable (main.tsx untouched)
+
+Ready for user sign-off.

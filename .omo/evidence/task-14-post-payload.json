@@ -1,0 +1,87 @@
+{
+  "task": "Task 14 — Post diff inline comments to GitHub PR",
+  "status": "DONE — backend IPC + UI button + store action + validation tests + build clean",
+  "spec_ref": ".omo/plans/termic-vs-conductor.md lines 522-545",
+  "files_changed": [
+    "src-tauri/src/lib.rs — new github_pr_post_diff_comment IPC + validate_post_diff_comment_args + head_sha added to GhPrDto at both gh_pr_view sites",
+    "src/lib/ipc.ts — githubPrPostDiffComment TS wrapper",
+    "src/lib/types.ts — head_sha added to GitHubPullRequest interface",
+    "src/store/app.ts — markDiffCommentPosted action + useWorkspace(wsId) selector",
+    "src/components/workspace/DiffCommentPopover.tsx — Post to GitHub button per unposted comment + Posted badge + no-PR hint"
+  ],
+  "gh_payload_shape": {
+    "endpoint_form": "gh api repos/<owner>/<repo>/pulls/<pr_number>/comments",
+    "owner_repo_discovery": "gh repo view --json owner,nameWithOwner (parsed in Rust; nameWithOwner is already 'owner/name' so we use it directly instead of re-joining owner.login + name)",
+    "args": [
+      { "flag": "-f", "key": "body",       "value_source": "comment.body",  "note": "string" },
+      { "flag": "-f", "key": "commit_id",  "value_source": "pr.head_sha",   "note": "40-char SHA1 hex" },
+      { "flag": "-f", "key": "path",       "value_source": "diff tab path", "note": "string" },
+      { "flag": "-F", "key": "line",       "value_source": "1-based line",  "note": "raw field so it ships as JSON int, not string" },
+      { "flag": "-f", "key": "side",       "value_source": "'left'|'right'","note": "string" }
+    ],
+    "response_parsing": "serde_json::from_str(stdout) -> .get('id').and_then(.as_u64) -> error if missing, 0, or non-uint",
+    "error_contract": "gh_unavailable / gh_unauthenticated / rate_limited / gh_error (via classify_gh_error, same as the rest of the gh surface)"
+  },
+  "store_action": {
+    "name": "markDiffCommentPosted",
+    "signature": "(wsId: string, commentId: string, remoteId: number, postedAt: string) => void",
+    "behavior": "Finds the comment in diffComments[wsId] and stamps remote_id + posted_at immutably. Idempotent — if already stamped with the same values, no-op (returns s unchanged so React doesn't re-render).",
+    "duplicate_post_guard": "The render layer hides the 'Post to GitHub' button when c.remote_id is truthy. The action itself also early-returns in the function body for defense in depth."
+  },
+  "ui_button": {
+    "location": "Per comment in the DiffCommentPopover, alongside Edit + Delete",
+    "show_when": "!c.remote_id && prSnapshot.pr !== null && prSnapshot.pr.head_sha is set",
+    "hide_when": "c.remote_id is set (Posted badge shows instead)",
+    "disabled_state": "no PR (hint 'No PR for this branch' shows at popover bottom) OR pr.head_sha is null (hint 'PR data is missing the head commit SHA. Refresh the Checks tab to fetch it.')",
+    "confirm": "useUI.askConfirm with title 'Post comment to PR #N?' + confirmLabel 'Post to GitHub'",
+    "success_toast": "Comment posted to PR #N",
+    "error_toast_kind_mapping": "gh_unavailable / gh_unauthenticated -> info; anything else -> error (same as Merge button, Task 13)",
+    "posted_badge_link": "pr.html_url + '#discussion_r' + remote_id (GitHub's standard deep-link format for review comments)"
+  },
+  "verification": {
+    "cargo_check": "Finished `dev` profile in 0.37s — clean",
+    "cargo_test_lib": "test result: ok. 94 passed; 0 failed; 0 ignored (93 pre-existing + 1 new validate_post_diff_comment_args_accepts_valid_inputs)",
+    "npm_run_build": "tsc -b && vite build — clean. 1812 modules transformed. ✓ built in 444ms."
+  },
+  "tests": [
+    {
+      "name": "validate_post_diff_comment_args_accepts_valid_inputs",
+      "covers": [
+        "side positive: 'left' / 'right' / ' left ' / '\\tright\\n' (whitespace tolerance)",
+        "side negative: '' / 'LEFT' / 'Right' / 'both' / 'L' / 'R' / 'leftt'",
+        "line positive: 1 / 2 / 100 / 9999 / u32::MAX",
+        "line negative: 0",
+        "commit_id positive: 40 hex chars (mixed case, '0123456789abcdef0123456789ABCDEF01234567')",
+        "commit_id length negative: empty / 3 chars / 39 chars / 64 chars (SHA-256 length)",
+        "commit_id charset negative: 40 non-hex chars (z * 40)"
+      ],
+      "error_message_contract": [
+        "side: starts with 'Invalid side:' AND contains ''left'' AND ''right''",
+        "line: contains 'Line must be greater than 0'",
+        "commit_id length: contains 'Invalid commit_id length' AND '40 hex chars'",
+        "commit_id charset: contains 'Invalid commit_id:' AND '40 hex chars'"
+      ]
+    }
+  ],
+  "cross_task_dependencies": [
+    "Reuses classify_gh_error from Task 8",
+    "Reuses EMPTY_PR_CHECKS selector + prChecks slice from Task 8",
+    "Reuses EMPTY_DIFF_COMMENTS selector + diffComments slice from Task 11",
+    "Reuses askConfirm + pushToast from useUI (Tasks 7/8/9/10/11/13)",
+    "Additive: GitHubPullRequest.head_sha (was null on the wire before; now optional)",
+    "Additive: new useWorkspace(wsId) selector (no consumer in the file before)"
+  ],
+  "patterns": [
+    "snake_case on BOTH sides of the wire (Rust DTO field head_ref_oid ↔ TS field head_sha via the GitHubPullRequest interface; serde default + Option for the gh-version optionality)",
+    "async fn + spawn_blocking for the two-gh-subprocess flow (repo view + api POST)",
+    "Reuse classify_gh_error for the stable <code>: <message> error prefix",
+    "Stable Zustand selectors with frozen empty constants (the new useWorkspace returns the same reference as long as the workspace row doesn't change; falls back to null for absent wsId)",
+    "spellCheck={false} autoCorrect='off' autoCapitalize='off' autoComplete='off' is preserved on the textarea (existing)",
+    "Tip + onClick={e => { if (!pr) e.preventDefault(); }} on the Posted badge so the link is a no-op when no PR anchor is available",
+    "data-testid attributes on every interactive element: diff-comment-post-<id>, diff-comment-posted-<id>, diff-comment-no-pr-hint"
+  ],
+  "qa_scenarios": {
+    "post_one_inline_comment": "Verified by code trace: popover open with pr + head_sha + !c.remote_id → button visible. Click → askConfirm → githubPrPostDiffComment IPC → on success, markDiffCommentPosted(wsId, c.id, remoteId, new Date().toISOString()) → pushToast(`Comment posted to PR #${pr.number}`, 'success'). The store mutation flips the comment's remote_id to a truthy number → selector re-runs → JSX maps to the Posted branch (button hidden, badge + link shown).",
+    "retry_does_not_duplicate": "Verified by code trace: popover open with c.remote_id set → the canPost flag (const canPost = !c.remote_id && !!pr && !!pr.head_sha) is false → button is not rendered. The Posted badge is the only thing in the footer. postToGitHub(c) also early-returns on c.remote_id (defense in depth). No IPC call can be made from the UI for a posted comment."
+  }
+}

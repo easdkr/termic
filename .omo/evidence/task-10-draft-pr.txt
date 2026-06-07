@@ -1,0 +1,281 @@
+Task 10 — PR create dialog (draft/regular)
+============================================
+
+Files changed
+-------------
+
+Backend (Rust):
+  - src-tauri/src/lib.rs
+      * New:  `extract_pr_url_from_gh_output(stdout) -> Result<String, String>`
+        — pure helper. Strips whitespace, takes the LAST non-empty
+        line (gh sometimes prints a banner first), and rejects
+        anything that doesn't look like `https://github.com/.../pull/<n>`
+        (or plain `http://github.com/...` for enterprise GHE).
+        Rejecting junk early means the follow-up `gh pr view <url>`
+        call gets a clean error instead of an opaque
+        "not a pull request".
+      * New:  `github_pr_create_blocking(project_id, title, body, base,
+        head, draft) -> Result<GitHubPullRequest, String>` — shells
+        out to `gh pr create --base … --head … --title … --body …`
+        in the project's `root_path` (same cwd pattern as the
+        Checks tab). Appends `--draft` only when `draft=true` so a
+        non-draft PR doesn't carry a flag the CLI could one day
+        treat as inverted. On success, parses the URL from stdout
+        and runs a follow-up `gh pr view <url> --json …` to
+        round-trip the freshly-created PR into our wire struct.
+        Title is trimmed before validation (paste-from-clipboard
+        carries trailing newlines) and rejected when empty.
+        Base + head are also non-empty validated (a clearer error
+        than `gh`'s own opaque "could not resolve …"). Errors
+        routed through `classify_gh_error` so the standard
+        `gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+        `gh_error` prefixes flow through.
+      * New:  `gh_pr_view_by_url_blocking(cwd, url)` — the URL-form
+        variant of Task 8's `gh_pr_view_blocking`. Same DTO → wire
+        struct translation, same snake_case on both sides. Kept as
+        a separate function because (a) the argv shape differs
+        (`<url>` vs `<branch>`), and (b) the "no pull requests
+        found" detection doesn't apply here — we just got the URL
+        from the create call, it has to exist.
+      * New:  `#[tauri::command] async fn github_pr_create(...) ->
+        Result<GitHubPullRequest, String>` — async + `spawn_blocking`
+        per the long-running-IPC discipline. Two `gh` subprocesses
+        (the create + the follow-up view) each take a few hundred
+        ms on a cold PATH. Wired in `invoke_handler` next to
+        `github_issue_fetch`.
+      * New:  1 unit test: `extract_pr_url_from_gh_output_handles_real_world_shapes`
+        — covers the 5 positive cases the QA scenario names
+        (plain URL, CRLF-terminated, no newline, multi-line with
+        banner, plain-http for enterprise GHE) + 4 negative cases
+        (empty, whitespace, banner-only, GitHub issue URL not /pull/,
+        different host).
+
+Frontend (TypeScript):
+  - src/lib/ipc.ts
+      * New:  `githubPrCreate({ projectId, title, body, base, head,
+        draft }) => invoke<GitHubPullRequest>("github_pr_create",
+        { projectId, title, body, base, head, draft })`. `GitHubPullRequest`
+        added to the `import type { ... }` block.
+  - src/store/ui.ts
+      * New:  `prCreateForWsId: string | null` +
+        `openPrCreate(wsId)` / `closePrCreate()`. Mirrors
+        `issueImportProjectId` / `sandboxForWsId` / etc. — lives in
+        the UI store (not app) so opening it doesn't churn the
+        workspace tree. The dialog resolves the project from the
+        workspace id (no need to thread projectId through), and
+        the IPC runs in the project's `root_path` on the Rust side.
+  - src/components/dialogs/PrCreateDialog.tsx (NEW)
+      * Title input (required) with inline "Title is required"
+        error rendered next to the field with `data-testid="pr-dialog-title-error"`.
+        The input itself has `data-testid="pr-dialog-title"`.
+      * Body textarea (auto-prefilled from `workspaceDiff(id)` on
+        dialog open, capped at 50KB to keep the textarea
+        manageable). The user can clear it; empty body is allowed
+        (`gh` tolerates an empty body — the dialog explicitly
+        surfaces "Auto-prefilled from the workspace diff when
+        available" as the hint copy).
+      * Base + head branch inputs (grid-cols-2) with monospace
+        font. Base defaults to `project.base_branch`; head defaults
+        to `ws.branch`. Both editable (e.g. PR from feature/x into
+        release/y instead of main).
+      * Draft checkbox (defaults to true per the plan spec's
+        "Auto-draft" framing).
+      * Pre-flight gating via `useApp.githubStatus`: the Create
+        button is disabled when `gh` is missing or unauthenticated,
+        with the same "Install gh" / "Run gh auth login" hint copy
+        the Checks tab uses. Mirrors the existing UX so the user
+        sees the same message in both surfaces.
+      * Submit-on-Enter (form's onSubmit). `submittingRef` guards
+        against double-submit (a real problem — a second
+        `gh pr create` would either create a duplicate or fail
+        with "pull request already exists").
+      * On success: success toast with an "Open PR" action button
+        that calls `openPath(pr.html_url)`. The success panel
+        inside the dialog also shows the URL + an explicit
+        "Open PR on GitHub" button. The dialog stays open so the
+        user can reach the URL; auto-close-on-success would race
+        the action click.
+      * On error: red error banner with the raw `gh` stderr. The
+        `gh_unavailable` / `gh_unauthenticated` prefix detection
+        appends the same "Install gh" / "Run gh auth login" hint
+        the pre-flight banner shows.
+      * `spellCheck={false}` + `autoCorrect="off"` +
+        `autoCapitalize="off"` + `autoComplete="off"` on every
+        input (mandatory per CLAUDE.md).
+      * `min-w-0` + `max-h-[220px]` + `overflow-auto` on the body
+        textarea per CLAUDE.md grid + sub-pixel rules.
+      * `data-testid="pr-dialog-create"` on the Create button
+        (QA hook the plan spec calls out).
+  - src/components/dialogs/Dialogs.tsx
+      * Mounted `<PrCreateDialog />` next to `<IssueImportDialog />`.
+  - src/components/workspace/RightPanel.tsx
+      * Added a "Create PR" button to the Checks tab empty state
+        ("No PR or checks found for this branch"). `data-testid="checks-create-pr"`.
+        Calls `useUI.getState().openPrCreate(ws.id)`. Hidden for
+        non-git projects and for `is_repo_root` workspaces —
+        `gh pr create` requires a real branch on disk; the repo-
+        root flow is Task 13/16 territory.
+
+Dialog mount approach (useUI flag vs local state)
+-------------------------------------------------
+
+**useUI flag** (`prCreateForWsId: string | null`). Same rationale
+as every other dialog in the file (`newWorkspaceProjectId`,
+`issueImportProjectId`, `sandboxForWsId`, `reviewForWsId`, etc.):
+
+  - The dialog is workspace-scoped (it needs the branch to know
+    the head ref) and the trigger button lives in the Checks tab
+    on the workspace surface. A single shared flag lets the
+    Checks-tab button AND any future entry points (a "Create PR"
+    item in the project dropdown, a keyboard shortcut, the tab-bar
+    workspace menu) re-use the same plumbing without re-wiring.
+  - The `useUI` store is the file's established home for dialog
+    visibility — it separates "is dialog X open" from the
+    workspace tree so flipping a flag doesn't churn the main
+    store (the rationale is in the existing `findInFilesWsId`
+    / `sandboxForWsId` JSDocs in the same file).
+  - The dialog resolves the project FROM the workspace via a
+    `useApp.projects.find(...)` lookup, mirroring how
+    `ReviewDialog` and `IssueImportDialog` look up their context.
+    The flag carries only the workspace id; the project + branch
+    flow from there.
+
+`gh` subprocess calls used
+--------------------------
+
+  $ gh pr create \
+        --base <base> \
+        --head <head> \
+        --title <title> \
+        --body <body> \
+        [--draft]                       # only when draft=true
+      # In cwd = project.root_path. Stdout = the PR URL.
+      #   https://github.com/<owner>/<repo>/pull/<n>\n
+      # On failure: stderr carries the auth hint / rate-limit
+      # text / etc. (classified by `classify_gh_error`).
+
+  $ gh pr view <url> \
+        --json number,title,body,state,headRefName,baseRefName,url,isDraft
+      # In cwd = project.root_path. Round-trips the freshly-
+      # created PR into a `GitHubPullRequest` for the dialog's
+      # success path. Same DTO → wire struct translation as
+      # `gh_pr_view_blocking` (Task 8).
+
+Build / cargo status
+--------------------
+
+  $ cargo check --manifest-path src-tauri/Cargo.toml
+      Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib
+      test result: ok. 92 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+      (91 prior + 1 new)
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib extract_pr_url
+      running 1 test
+      test tests::extract_pr_url_from_gh_output_handles_real_world_shapes ... ok
+      test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out
+
+  $ npm run build
+      vite v8.0.13 building client environment for production...
+      ✓ 1812 modules transformed.
+      dist/assets/index-Bb4RrZOS.js                                  2,141.70 kB │ gzip: 590.09 kB
+      ✓ built in 376ms
+      (no TypeScript errors; the >500 kB chunk warning is pre-existing,
+       unrelated to this task)
+
+  $ npx tsc --noEmit
+      (no output — no type errors)
+
+QA scenarios — verification approach
+------------------------------------
+
+This task is agent-executable rather than UI-executable (no
+Playwright in scope). Verification is by reading the produced code
++ the test output. Each plan scenario maps to a code/test
+assertion:
+
+  Scenario: Create draft PR
+    - The dialog renders the success panel with the returned
+      URL + draft chip — `PrCreateDialog.tsx` (success branch in
+      render).
+    - The success toast is `Draft PR #<n> created` with an
+      "Open PR" action that calls `openPath(pr.html_url)`.
+      Same affordance the rest of the app uses for "I just did
+      X, want to jump to it?".
+    - The success text contains `/pull/<n>` (the URL is the
+      GitHub PR URL, e.g. `https://github.com/acme/app/pull/42`).
+    - On the Rust side: `gh pr create --base main --head
+      feature/x --title "..." --body "..." --draft` then a
+      follow-up `gh pr view <url> --json ...` round-trip.
+
+  Scenario: Empty title blocked
+    - The dialog trims the title on every keystroke
+      (`setTitleError(null)` on the next change) and re-validates
+      on submit. When empty after trim, it sets
+      `setTitleError("Title is required")` and the inline error
+      renders under the input with
+      `data-testid="pr-dialog-title-error"` — the QA hook the
+      plan spec calls out.
+    - The backend is belt-and-suspenders — it ALSO trims +
+      rejects empty titles (paste-from-clipboard edge case
+      where the user clicks Create before the JS state has
+      caught up).
+
+  Scenario: gh unavailable
+    - When the `gh` binary is missing, `Command::new("gh").output()`
+      returns an io error → mapped to
+      `"gh_unavailable: failed to spawn gh pr create: ..."` in
+      `github_pr_create_blocking`. The dialog renders the
+      `gh_unavailable` branch (install hint) — same UX the
+      Checks tab uses.
+    - When `gh` is found but exits non-zero with no stderr,
+      `classify_gh_error(&failed, "")` returns
+      `"gh_unavailable: gh CLI exited with no output ..."`. Test
+      coverage: the existing `classify_gh_error_emits_stable_codes`
+      test pins the prefix.
+    - The dialog does the prefix match: `err.split(":", 1)[0]`
+      and checks for `"gh_unavailable"` / `"gh_unauthenticated"`.
+      Both render the matching hint.
+
+  Scenario: Title is required (from the Rust side)
+    - The Rust side ALSO validates the title (defense in depth
+      in case a future caller skips the client-side check). The
+      error string is exactly `"Title is required"` — the same
+      text the dialog uses for the inline error. So even if the
+      client somehow lets an empty title through, the user gets
+      the same message.
+
+Notes
+-----
+
+  - Two `gh` subprocesses per call (create + view). The cost is
+    two network round-trips for what is one logical action.
+    Acceptable for v1; if it becomes a hotspot, the
+    follow-up `gh pr view` could be replaced with a single
+    `gh pr create ... --json` (newer `gh` versions support this
+    and return the full PR object inline) but the current
+    shape is portable across older `gh` versions and matches
+    the "URL is the artifact" mental model the CLI's docs use.
+  - The Rust side checks `base` / `head` non-empty BEFORE
+    spawning `gh`. The dialog also prevents this client-side
+    (the submit handler returns early on empty), so the Rust
+    check is mostly defense in depth — but it catches the case
+    where the user sets a base branch to an empty string in
+    project settings and the dialog's default is then an empty
+    field.
+  - No OAuth. The IPC uses the user's existing `gh` install +
+    auth — same stance as the rest of the termic-vs-conductor
+    plan.
+  - No approvals / reviews / request-changes posted. Create +
+    view + (Task 13) merge only.
+  - No new dependencies. Reuses `serde_json`, `anyhow`, the
+    `Command` builder, `tauri::async_runtime::spawn_blocking`,
+    `classify_gh_error` (Task 8), the `GitHubPullRequest` type
+    (Task 1), and every other primitive the rest of the `gh`
+    surface uses.
+  - PTY lifecycle untouched. The dialog is purely a frontend
+    overlay; it does not spawn or kill any PTY. The success
+    path closes the dialog and shows a toast; the user can then
+    manually click into the Checks tab to see the new PR (or
+    stay where they are and just open the URL).

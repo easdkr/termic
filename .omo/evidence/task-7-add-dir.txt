@@ -1,0 +1,102 @@
+Task 7 — /add-dir project settings UI
+========================================
+
+Build verification
+------------------
+
+$ npm run build
+[output truncated above; full result]
+dist/index.html                                                    0.43 kB │ gzip:   0.27 kB
+dist/assets/index-DFaYdNPe.js                                  2,115.59 kB │ gzip: 584.28 kB
+✓ built in 368ms
+
+$ cargo check --manifest-path src-tauri/Cargo.toml
+    Checking termic v0.8.2 (/Users/june/workspace/personal/termic/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.18s
+
+Both clean — no TS errors, no Rust warnings/errors.
+
+
+Unit tests
+----------
+
+Added 4 new tests to the existing `tests` module in lib.rs:
+
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib -- materialize validate
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/termic_lib-dd143c23c00ee6fc)
+
+running 4 tests
+test tests::validate_link_name_rejects_bad_inputs ... ok
+test tests::materialize_is_noop_when_symlink_already_correct ... ok
+test tests::materialize_applies_symlink_for_valid_link ... ok
+test tests::materialize_skips_when_real_file_occupies_link_path ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 79 filtered out; finished in 0.44s
+
+Full suite (after the new tests):
+
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib
+... (83 total tests)
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+
+QA Scenario 1: External dir link materializes
+----------------------------------------------
+
+$ TMPROOT=$(mktemp -d)
+$ WT=$(mktemp -d "$TMPROOT/wt-XXXXXX")
+$ TARGET=$(mktemp -d "$TMPROOT/target-XXXXXX")
+$ NAME="shared-docs"
+
+Step 1: validate name (mirrors validate_link_name — empty/`/`/`..`/leading-dot rejected).
+Step 2: create symlink via std::os::unix::fs::symlink(target, link) — same call shape
+        the Rust helper uses.
+
+Output:
+  applied: shared-docs -> /var/folders/.../target-pgT5jj
+  PASS: $WT/shared-docs is a symlink
+  PASS: symlink resolves to /var/folders/.../target-pgT5jj
+
+`test -L <worktree>/shared-docs` succeeded; the symlink resolves to the
+configured target path exactly as the helper would in workspace_create_sync.
+
+
+QA Scenario 2: Invalid link name rejected
+-----------------------------------------
+
+Mirrors the Rust `validate_link_name` rejection set:
+
+  name='../secrets'  -> REJECTED: invalid link name (no / allowed)
+  name='a/b'         -> REJECTED: invalid link name (no / allowed)
+  name='a..b'        -> REJECTED: invalid link name (no .. allowed)
+  name='.hidden'     -> REJECTED: invalid link name (cannot start with .)
+  name=''            -> REJECTED: link name cannot be empty
+
+Note: '../secrets' is rejected by the `/` check before the `..` check
+runs (since `..` contains `/`); either rule alone is sufficient. The
+`..` rejection is needed for the `a..b` shape (no `/` present).
+
+
+Behavior summary
+----------------
+
+- `materialize_external_dir_links` is called from both
+  `workspace_create_sync` (after `files_to_copy` copy, before
+  `port` allocation) and `workspace_import_worktree` (after
+  `save_workspace`, before `Ok(ws)`). New + imported workspaces
+  get the symlinks for free.
+- Skip-don't-clobber: a real file at the link path is left alone
+  with a logged warning, matching the plan's "do not overwrite real
+  files" rule. Verified by `materialize_skips_when_real_file_occupies_link_path`.
+- Repair button: `workspace_repair_links` (async + spawn_blocking)
+  re-materializes the project's links in EVERY active workspace,
+  returns a flat list of result lines for the UI toast.
+- Validation: empty / `/` / `..` / leading-dot are all rejected on
+  the Rust side. The TS form has a client-side mirror of the same
+  rules for fast feedback; the Rust side is the authoritative check.
+- IPC contract: snake_case on both sides (project_id, name,
+  target_path, workspace_id, etc.) — matches the established
+  Task 1 / Task 6 convention.
+- No new dependencies; `openDialog({ directory: true })` reuses
+  the existing `tauri-plugin-dialog` integration.

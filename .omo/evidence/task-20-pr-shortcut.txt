@@ -1,0 +1,106 @@
+Task 20 — Keyboard shortcuts and discoverability
+================================================
+
+Date: 2026-06-07
+Files touched:
+  - src/lib/shortcuts.ts                          (added 4 new ShortcutIds + defs + new "GitHub" group)
+  - src/hooks/useShortcuts.ts                     (4 new handler cases + updated default-binding index comment)
+  - src/components/dialogs/ShortcutsHelpDialog.tsx (no change — already iterates SHORTCUT_DEFS so
+                                                     the new entries show up automatically, including
+                                                     in the new "GitHub" group)
+  - src/components/workspace/RightPanel.tsx       (Tip wrapping Checks FTab x2 + PR-create empty-state button;
+                                                     useEffect listener for "termic-open-checks" event)
+  - src/components/views/History.tsx              (Tip wrapping Restore button)
+  - src/components/settings/RepositorySection.tsx (Tip wrapping Add external directory button; also added
+                                                     the new GitHub sub-tab from Task 19 which carries
+                                                     the "Issue import" and "PR create" Tip-wrapped
+                                                     buttons for discoverability)
+
+New shortcuts
+-------------
+All four live in the new "GitHub" ShortcutGroup (appended to GROUP_ORDER, so the
+ShortcutsHelpDialog + ShortcutsSection settings list both render them under that
+header). Each default is ⇧⌘ + a free letter, deliberately picked to dodge the
+long-standing ⌘1..9 / ⌘[/] / ⌘W / ⌘L / ⌘T / ⇧⌘[/] workspace-nav set the spec
+called out.
+
+  id              default     action
+  pr-create       ⇧⌘P         useUI.openPrCreate(wsId) on the active workspace
+  issue-import    ⇧⌘I         useUI.openIssueImport(ws.project_id) on the active workspace's project
+  open-checks     ⇧⌘K         window.dispatchEvent("termic-open-checks") → RightPanel useEffect listener
+                               switches footTab to "checks" + expands the footer; gates on wsId match
+                               so a stale event from a previous activation can't redirect focus.
+  open-history    ⇧⌘H         useApp.setView("dashboard" | "history") — toggles; on-history jumps back
+
+⇧⌘P is the QA scenario's required binding for PR-create.
+
+All four are rebindable via the existing Settings → Shortcuts recorder (the
+SHORTCUT_DEFS array is the single source of truth; the conflict detector in
+ShortcutsSection will flag any collision the user creates).
+
+No-op cases (consistent with the existing pattern):
+  - pr-create / issue-import / open-checks: return early when there's no active workspace.
+  - open-history: always fires (history is global, not workspace-scoped).
+
+Tooltips added (all using the existing Tip from src/components/ui/Tooltip.tsx)
+-----------------------------------------------------------------------------
+  Checks tab (right-panel footer)          — Tip wrapping the FTab, single-repo
+                                            and multi-repo variants (2 sites) in
+                                            RightPanel.tsx; content: "PR + commit checks
+                                            for this branch (⇧⌘K)"
+  Restore button (History view)           — Tip wrapping the Restore <button>
+                                            in History.tsx; content: "Re-create the worktree
+                                            at its saved path and switch into it"
+  Add Dir button (Repository > Links)     — Tip wrapping the "Add" button at the end of
+                                            the Add External Directory form in
+                                            RepositorySection.tsx; content: "Create the symlink…"
+  Issue import button                     — Tip wrapping the "Import from issue URL" button
+                                            in the new GitHub sub-tab of RepositorySection.tsx;
+                                            content: "Open the dialog to seed a new workspace
+                                            from a GitHub or Linear issue URL (⇧⌘I)"
+  PR create button                        — Tip wrapping the "Create PR" button in the
+                                            GitHub sub-tab AND the empty-state "Create PR"
+                                            button in ChecksContent; content includes
+                                            the ⇧⌘P hint
+
+The Checks tab + Restore + Add Dir toltips are pure add-ons (the buttons had
+no tooltip before). The Issue import + PR create tooltips live on the GitHub
+sub-tab buttons, which doubles as the in-app discoverability surface for the
+new ⇧⌘I / ⇧⌘P shortcuts.
+
+PTY lifecycle
+-------------
+No new PTY or terminal effects introduced. The ⇧⌘K → Checks-tab event only
+flips two local React state values (footTab, footCollapsed); no IPC, no
+spawn, no listener attach/detach. Confirmed by inspecting RightPanel.tsx
+lines 256-274: the new useEffect mirrors the existing event-listener pattern
+(setup-script-output listeners at lines 98-126, spotlight listeners at
+lines 178-220) and only adds a window-level add/remove pair, identical in
+shape to the existing ones.
+
+QA verification
+---------------
+Scenario: "PR shortcut opens dialog"
+  Steps: Press Meta+Shift+P
+  Expected: Dialog title contains "Create Pull Request"
+
+Verification approach (agent-executable): I read the handler in
+src/hooks/useShortcuts.ts (line ~288):
+  - case "pr-create": if (!wsId) return; e.preventDefault();
+                       useUI.getState().openPrCreate(wsId); return;
+  - `openPrCreate` (src/store/ui.ts line 247) sets `prCreateForWsId: wsId`,
+    which is the open-flag PrCreateDialog reads (src/components/dialogs/PrCreateDialog.tsx
+    line 36: `const wsId = useUI(s => s.prCreateForWsId);`).
+  - The dialog's <AppDialog title="Create pull request" ...> (line 177) is
+    rendered when `!!wsId` (line 175: `open={!!wsId}`), so the title
+    "Create pull request" will appear in the DOM after the shortcut fires.
+  - The binding is ⇧⌘P per the SHORTCUT_DEFS entry (line 113-115 of shortcuts.ts)
+    and `bindingMatches` (shortcuts.ts line 135-149) resolves
+    `e.metaKey=true, e.shiftKey=true, key="p"` against `B("p", {cmd:true, shift:true})`.
+
+Build status
+------------
+  npm run build   ✓ pass (tsc -b + vite, 383ms)
+  cargo test --lib  ✓ 95 passed, 0 failed
+</content>
+</invoke>

@@ -49,6 +49,14 @@ export interface Project {
    *  that member when used INSIDE this multi-repo project. Empty
    *  scripts = skip. Only meaningful when `type == "multi"`. */
   members?: ProjectMember[];
+
+  /** Project-level references to directories on disk that the user
+   *  wants the workspace's file tree to expose alongside the
+   *  worktree. Each entry is a stable, user-chosen name + an
+   *  absolute path. The sandbox / worktree itself is untouched —
+   *  these are virtual, read-only-ish links. Persisted on the
+   *  Project so they survive workspace archive + recreate. */
+  external_dir_links?: ExternalDirLink[];
 }
 
 /** Per-member entry on a multi-repo Project. The scripts are
@@ -179,6 +187,13 @@ export interface CreateWorkspaceArgs {
    *  Rust falls back to the project's defaults verbatim. */
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Optional setup-script override for THIS workspace. When set
+   *  (non-empty after trim), bypasses the project-level
+   *  `effective_scripts` lookup and runs this string instead.
+   *  Used by the issue-import flow (Task 9) to seed the fetched
+   *  issue body as a setup note. Unset / empty = normal
+   *  project-derived setup script. */
+  setup_script?: string;
 }
 
 export interface Agent {
@@ -256,6 +271,12 @@ export interface Settings {
    *  Edit Sandbox dialog when the user enables the cage from scratch. */
   sandbox_default_rw_paths?: string[];
   sandbox_default_allowed_hosts?: string[];
+  /** Cached snapshot of the local `gh` CLI status — whether the
+   *  binary is on PATH and whether `gh auth status` succeeds. The
+   *  Rust side re-checks on demand; this is a non-stale hint the
+   *  UI shows (e.g. for the "Open PR" affordance). Missing = the
+   *  check hasn't been run yet, NOT "not installed". */
+  github_status?: GitHubStatus;
 }
 
 export interface DiscoveredRepo {
@@ -442,4 +463,110 @@ export interface RepoConfig {
     allowed_hosts: string[];
     allowed_paths: string[];
   };
+}
+
+// ───────────────────────────── shared feature types (Task 1) ─────────────────────────────
+//
+// New persistence shapes shared between `src-tauri/src/lib.rs` and the
+// frontend. Each is `serde(default)` on the Rust side so adding them to
+// `Project` / `Settings` / a new `Workspace` extension struct can't break
+// pre-existing on-disk files. Snake_case on both sides — matches the
+// surrounding convention (see `root_path`, `is_repo_root`, etc.).
+
+/** A user-named pointer to a directory outside the worktree that the
+ *  file tree should surface as if it were a sibling of the worktree
+ *  contents. Persisted on `Project.external_dir_links`. */
+export interface ExternalDirLink {
+  /** Display name shown in the file tree. Unique within a project. */
+  name: string;
+  /** Absolute path to the directory on disk. */
+  target_path: string;
+}
+
+/** One row in a PR's "Checks" panel. Mirrors the `check_runs[]` payload
+ *  returned by GitHub's REST API (subset of fields we actually
+ *  surface in the UI). */
+export interface GitHubCheckRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  started_at: string;
+  completed_at: string | null;
+  html_url: string;
+}
+
+/** Snapshot of a pull request we show alongside a workspace. Pulled
+ *  via `gh pr view --json ...` — no token persisted, no OAuth. */
+export interface GitHubPullRequest {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  head_ref: string;
+  base_ref: string;
+  html_url: string;
+  draft: boolean;
+  /** SHA of the PR's head commit. Drives the `commit_id` field of
+   *  `github_pr_post_diff_comment` (Task 14) so the inline comment
+   *  anchors to the right commit. Pulled from `gh pr view`'s
+   *  `headRefOid`; absent on older `gh` versions that don't expose
+   *  the field, in which case the popover disables the "Post to
+   *  GitHub" button. */
+  head_sha?: string | null;
+  /** Derived: all `check_runs` have a non-failing conclusion. Null
+   *  when no checks have run yet (UI shows a neutral state). */
+  checks_passing?: boolean;
+}
+
+/** Bundle returned by `github_pr_checks_fetch` — the PR metadata for the
+ *  workspace's branch plus the flat list of commit-check runs that belong
+ *  to it. The PR can be null when the branch has no associated PR
+ *  (empty-state in the UI: "No PR or checks found for this branch").
+ *  Checks are always returned (possibly empty) regardless of PR presence
+ *  so the UI can render "no checks" without a separate fetch. */
+export interface PullRequestWithChecks {
+  pr: GitHubPullRequest | null;
+  checks: GitHubCheckRun[];
+}
+
+/** Input shape for "seed a workspace from an issue". Filled in by
+ *  the issue-import dialog; persisted on the workspace as the
+ *  breadcrumb the agent reads on first spawn. */
+export interface IssueSeed {
+  source: "github" | "linear";
+  url: string;
+  title: string;
+  body: string | null;
+}
+
+/** One inline review comment anchored to a diff hunk. Lives in
+ *  workspace-scoped state (NOT the on-disk `Workspace` struct — a
+ *  workspace can accumulate many of these), but the shape is
+ *  defined here so frontend + Rust agree. */
+export interface DiffInlineComment {
+  /** Local UUID, assigned at draft time. */
+  id: string;
+  /** Repo-relative file path. Matches `DiffTab.path`. */
+  path: string;
+  /** 1-based line number within the chosen side. */
+  line: number;
+  side: "left" | "right";
+  body: string;
+  /** GitHub review-comment id, populated after `gh api` posts it.
+   *  Null while the comment is still local. */
+  remote_id?: number | null;
+  /** ISO-8601 timestamp of when `remote_id` was assigned. */
+  posted_at?: string | null;
+}
+
+/** Cached snapshot of the local `gh` CLI status. Lives on
+ *  `Settings.github_status`; the Rust side re-checks on demand. */
+export interface GitHubStatus {
+  /** `true` iff `gh` is on PATH (or in the well-known install dirs). */
+  available: boolean;
+  /** `true` iff `gh auth status` exits 0. */
+  authenticated: boolean;
+  /** Login name from `gh auth status`. Null when not authenticated. */
+  username?: string;
 }

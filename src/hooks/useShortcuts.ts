@@ -14,16 +14,22 @@
 //   ⇧⌘D      → open a new bottom-split terminal in the active workspace
 //   ⌘T       → new tab · ⌘K → clear terminal · ⌘P → file finder
 //   ⇧⌘F      → find in files · ⇧⌘B → broadcast · ⌘, → settings
+//   ⇧⌘P      → create PR (active workspace) — Task 20
+//   ⇧⌘I      → import from issue URL (active workspace's project) — Task 20
+//   ⇧⌘K      → open Checks tab in the right panel — Task 20
+//   ⇧⌘H      → open History view (archived workspaces) — Task 20
 import { useEffect } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
 import { requestCloseTab } from "@/lib/closeTab";
 import { bindingMatches, SHORTCUT_DEFS, type ShortcutId } from "@/lib/shortcuts";
+import { isImeKeyboardEvent } from "@/lib/terminalIme";
 
 export function useShortcuts() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (isImeKeyboardEvent(e)) return;
       const binds = usePrefs.getState().shortcuts;
       // First binding (in registry order) whose combo the event satisfies.
       // Exact modifier matching makes commands mutually exclusive unless the
@@ -135,7 +141,8 @@ export function useShortcuts() {
         case "focus-terminal": {
           if (!wsId || isTyping) return;
           e.preventDefault();
-          const el = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+          const host = activeTabId ? document.querySelector(`[data-tab-id="${CSS.escape(activeTabId)}"]`) : null;
+          const el = host?.querySelector(".termic-terminal-input, .xterm-helper-textarea") as HTMLTextAreaElement | null;
           el?.focus();
           return;
         }
@@ -223,7 +230,7 @@ export function useShortcuts() {
           // its xterm helper-textarea is in the DOM.
           const tryFocus = (tries = 20) => {
             const split = document.querySelector("[data-bottom-split]");
-            const active = split?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+            const active = split?.querySelector(".termic-terminal-input, .xterm-helper-textarea") as HTMLTextAreaElement | null;
             if (active) { active.focus(); return; }
             if (tries > 0) setTimeout(() => tryFocus(tries - 1), 25);
           };
@@ -274,6 +281,54 @@ export function useShortcuts() {
           }
           // requestCloseTab confirms first if it's a dirty edit tab.
           if (wsId && activeTabId) requestCloseTab(wsId, activeTabId);
+          return;
+        }
+
+        // ⇧⌘P → open the PR-create dialog for the active workspace.
+        // No-op when there's no active workspace (no wsId → no branch to PR
+        // from). Mirrors the existing per-workspace check on the
+        // Checks-tab "Create PR" empty-state button (RightPanel.tsx).
+        case "pr-create":
+          if (!wsId) return;
+          e.preventDefault();
+          useUI.getState().openPrCreate(wsId);
+          return;
+
+        // ⇧⌘I → open the issue-import dialog for the active workspace's
+        // project. Resolves project_id from the live workspace row so the
+        // dialog pre-seeds the same way the sidebar's "From issue URL"
+        // menu item does. No-op when there's no active workspace.
+        case "issue-import": {
+          if (!wsId) return;
+          e.preventDefault();
+          const ws = state.workspaces.find(w => w.id === wsId);
+          if (!ws) return;
+          useUI.getState().openIssueImport(ws.project_id);
+          return;
+        }
+
+        // ⇧⌘K → switch the right-panel footer to the Checks tab. The
+        // footTab state is local to RightPanel, so we dispatch a custom
+        // event the panel listens for (same pattern as
+        // `termic-new-tab-menu` for the `+` tab menu). The event carries
+        // the active workspace id for parity with the other event types;
+        // RightPanel also gates on its own `ws.id` so the wrong workspace
+        // can't sneak through.
+        case "open-checks":
+          if (!wsId) return;
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("termic-open-checks", { detail: { wsId } }));
+          return;
+
+        // ⇧⌘H → jump to the History view (archived workspaces). setView
+        // clears `activeWorkspaceId` (see app.ts), so this also closes
+        // any active workspace context — matches what the sidebar's
+        // "History" entry does. Toggling: if already on history, jump
+        // back to dashboard so the user can re-trigger to come back.
+        case "open-history": {
+          e.preventDefault();
+          const onHistory = useApp.getState().view.page === "history";
+          useApp.getState().setView(onHistory ? "dashboard" : "history");
           return;
         }
       }

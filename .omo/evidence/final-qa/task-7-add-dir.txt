@@ -1,0 +1,60 @@
+TASK 7 — /add-dir: link materializes + invalid name rejected
+============================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:347-370
+Subagent evidence: .omo/evidence/task-7-add-dir.txt
+
+SCENARIO 1 — link materializes on workspace create
+--------------------------------------------------
+Code locations traced:
+  - src-tauri/src/lib.rs:1457-1472  validate_link_name
+      - empty → "link name cannot be empty"
+      - '/'  → "invalid link name (no '/' allowed)"
+      - '..' → "invalid link name (no '..' allowed)"
+      - leading '.' → "invalid link name (cannot start with '.')"
+  - src-tauri/src/lib.rs:1479-1521  materialize_external_dir_links
+      - Skips (with logged warning) when target.symlink_metadata() resolves a
+        non-symlink real path — "skipped (existing real path)" branch
+      - Creates symlink with std::os::unix::fs::symlink(target, link)
+      - Idempotent: "exists (symlink OK)" when the symlink already points at
+        the configured target_path
+  - src-tauri/src/lib.rs:2130  workspace_create_sync calls
+    `let _ = materialize_external_dir_links(&proj, &wt_path);` after the
+    files_to_copy copy and before port allocation.
+  - src-tauri/src/lib.rs:3501  workspace_restore_sync also calls
+    materialize_external_dir_links, so restored worktrees get links for free.
+
+Verification approach: unit tests + Bash symmetry test.
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- materialize
+  test tests::materialize_applies_symlink_for_valid_link ... ok
+  test tests::materialize_is_noop_when_symlink_already_correct ... ok
+  test tests::materialize_skips_when_real_file_occupies_link_path ... ok
+  test result: ok. 3 passed; 0 failed
+  Subagent's bash walkthrough also created a real symlink via
+  std::os::unix::fs::symlink and verified `test -L` succeeds.
+
+VERDICT: PASS — unit test pins the happy path, idempotent re-run, and the
+"do not clobber real files" guard. workspace_create_sync AND
+workspace_restore_sync both invoke the helper.
+
+
+SCENARIO 2 — invalid link name rejected
+---------------------------------------
+Code location: src-tauri/src/lib.rs:1457-1472
+
+The validate_link_name_rejects_bad_inputs unit test pins every rejection path:
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- validate_link_name
+  test tests::validate_link_name_rejects_bad_inputs ... ok
+
+Negative cases covered: "", "   " (whitespace), "a/b", "../secrets",
+"a..b", ".hidden", ".". Positive cases: "shared-docs", "notes_2024",
+"  shared-docs  " (trim tolerance).
+
+The frontend RepositorySection wraps the same rules in a client-side mirror
+for fast feedback, and the Rust IPC is the authoritative gate. The error
+strings ("link name cannot be empty", "invalid link name (no '/' allowed)",
+"invalid link name (no '..' allowed)", "invalid link name (cannot start
+with '.')") propagate to the dialog as the inline error message.
+
+VERDICT: PASS — the Rust validator is the single authoritative gate, the
+unit test pins every rejection path, and the error strings are
+user-readable.

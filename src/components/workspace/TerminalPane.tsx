@@ -19,6 +19,7 @@ import { loadTerminalRenderer } from "@/lib/terminalRenderer";
 import { IS_MAC } from "@/lib/shortcuts";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
 import { sendMessageToPty } from "@/lib/agentSend";
+import { installTerminalInputProxy, isImeKeyboardEvent } from "@/lib/terminalIme";
 import type { TerminalTab, Workspace } from "@/lib/types";
 import * as ipc from "@/lib/ipc";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg } from "@/store/prefs";
@@ -96,6 +97,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
   const fitRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const inputProxyRef = useRef<{ focus: () => void } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const unlistenDataRef = useRef<(() => void) | null>(null);
@@ -290,6 +292,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
 
     const term = new Terminal({
       cursorBlink: true,
+      cursorInactiveStyle: "block",
       fontFamily: currentTerminalStack(),
       fontSize: usePrefs.getState().terminalFontSize,
       // Regular 400 / bold 700 — the two static JetBrains Mono masters
@@ -354,6 +357,25 @@ export function TerminalPane({ ws, tab, active }: Props) {
     term.open(host);
     termRef.current = term;
     fitRef.current = fit;
+    const inputProxy = installTerminalInputProxy(host, term, (text) => {
+      const pid = ptyRef.current;
+      if (!pid) return;
+      if (text.indexOf("\r") !== -1 || text.indexOf("\n") !== -1) {
+        settledRef.current = { lastHash: 0, unchangedCount: 0, marked: false };
+        scrollbackRef.current = { lastLen: -1, stableCount: 0, marked: false };
+        const cur = useApp.getState().tabs[ws.id]?.find(t => t.id === tab.id);
+        if (cur?.type === "terminal" && cur.workState === "done") setWorkState(ws.id, tab.id, "idle");
+        if (cur?.unread) useApp.getState().clearAttention(ws.id, tab.id);
+        patchTab(ws.id, tab.id, { lastInputAt: Date.now() });
+        submittedSinceSpawnRef.current = true;
+        submitAtRef.current = Date.now();
+        submitWindowUntilRef.current = submitAtRef.current + 5_000;
+        preSubmitHashRef.current = hashVisibleBuffer(term);
+        doneFiredSinceSubmitRef.current = false;
+      }
+      ipc.ptyWrite(pid, Array.from(new TextEncoder().encode(text))).catch(() => {});
+    });
+    inputProxyRef.current = inputProxy;
 
     // Drop target: dragging a file (screenshot, etc.) onto this terminal
     // inserts the file's escaped path at the prompt — like macOS Terminal.
@@ -381,6 +403,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     // first but recent claude builds no longer recognize it — they
     // require the explicit backslash-Enter pair.
     term.attachCustomKeyEventHandler((e) => {
+      if (isImeKeyboardEvent(e) || inputProxy.isComposing()) return true;
       // Open the in-terminal search overlay. ⌘F on macOS; Ctrl+Shift+F
       // elsewhere — plain Ctrl+F is readline's forward-char, so hijacking it
       // would break the shell on Linux/Windows.
@@ -1229,6 +1252,8 @@ export function TerminalPane({ ws, tab, active }: Props) {
       cancelled = true;
       ro.disconnect();
       unregisterDrop();
+      inputProxy.dispose();
+      if (inputProxyRef.current === inputProxy) inputProxyRef.current = null;
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
@@ -1264,7 +1289,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
     if (!active || !isActiveWorkspace) return;
     requestAnimationFrame(() => {
       try { fitRef.current?.fit(); } catch {}
-      try { termRef.current?.focus(); } catch {}
+      inputProxyRef.current?.focus();
     });
   }, [active, isActiveWorkspace]);
 
@@ -1298,7 +1323,7 @@ export function TerminalPane({ ws, tab, active }: Props) {
         el.select();
       });
     } else {
-      termRef.current?.focus();
+      inputProxyRef.current?.focus();
     }
   }, [searchOpen]);
 

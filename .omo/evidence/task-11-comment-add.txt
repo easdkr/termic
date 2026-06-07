@@ -1,0 +1,220 @@
+Task 11 — Diff inline comment markers and editor UI
+=====================================================
+
+
+Files changed
+-------------
+
+- `src/store/app.ts` — new `diffComments` state + 3 actions + `useDiffComments` selector
+- `src/components/workspace/DiffPane.tsx` — custom `gutter()` extension (side-aware), popover anchor state
+- `src/components/workspace/DiffCommentPopover.tsx` — NEW: the per-line popover component
+
+Net diff: +1 new file, 2 files modified, ~700 LOC added.
+
+
+Store shape
+-----------
+
+```ts
+// src/store/app.ts
+diffComments: Record<string /* wsId */, DiffInlineComment[]>;
+
+addDiffComment(wsId, path, side, line, body) -> string | null   // null on empty body
+updateDiffComment(id, body) -> boolean                            // false on empty body
+deleteDiffComment(id) -> void                                    // no-op if not found
+
+// Frozen empty constant for stable selector results.
+const EMPTY_DIFF_COMMENTS: DiffInlineComment[] = Object.freeze([]) as ...;
+
+export const useDiffComments = (wsId) =>
+  useApp(s => (wsId ? (s.diffComments[wsId] ?? EMPTY_DIFF_COMMENTS) : EMPTY_DIFF_COMMENTS));
+```
+
+The flat `Record<wsId, DiffInlineComment[]>` shape is intentional: comments carry
+their own `path` / `side` / `line` fields, so lookup is just a `filter()` per
+(ws, line). Per-workspace arrays are small in practice (tens of comments
+typically), so we trade the index-by-path memory of a nested Record for the
+simpler store mutation. The `EMPTY_DIFF_COMMENTS` frozen constant follows the
+existing `EMPTY_TABS` pattern at `app.ts:840` — Zustand 5 + React 19 will warn
+"getSnapshot should be cached" if a selector returns a new array on every call.
+
+
+Gutter approach: custom `gutter()` + `GutterMarker` subclass
+-----------------------------------------------------------
+
+Picked `gutter()` from `@codemirror/view` (not `Decoration` widgets) because
+gutter markers:
+
+1. Sit OUTSIDE the editor content, so they don't shift the diff tints or wrap.
+2. Get a free `data-line` from `BlockInfo` (no doc math in click handler).
+3. Re-render only on view updates, not on every keystroke.
+4. Have first-class `domEventHandlers.click` at the gutter level (delegation
+   from the gutter down to the marker via `event.target.closest()`).
+
+The `CommentGutterMarker` subclass overrides `eq()` so the same marker
+identity is reused across `lineMarker` re-evaluations. The marker renders
+inline SVG (lucide path data hardcoded — `GutterMarker.toDOM()` is imperative
+DOM, not React, so a React root per marker would be wasteful):
+
+- Lines WITHOUT comments: `MessageCirclePlus` path, dim, opacity 0.45
+- Lines WITH comments: `MessageSquare` path, accent color, full opacity,
+  with a subtle accent-tinted background on hover
+
+The `data-testid="diff-comment-add-<line>"` attribute is on the marker's DOM
+element per the plan QA selector. Lines have a `data-line="<N>"` attribute too
+for any future selector that wants the side in addition to the line.
+
+Side detection (the only tricky bit):
+
+- Side-by-side: `@codemirror/merge` adds the class `cm-merge-a` to the
+  "original" editor's host and `cm-merge-b` to the "modified" editor's host.
+  The click handler reads `view.dom.classList.contains("cm-merge-a")` to
+  decide whether the click came from the left or right side. The line number
+  is read from the editor's own doc (1-based) — `view.state.doc.lineAt(
+  line.from).number`.
+- Unified: no `cm-merge-*` class on the host. Treated as "right" because the
+  visible line numbers come from the modified doc. "Left" comments are not
+  rendered in unified mode (pragmatic — they'd attach to the original doc's
+  line numbers, which are not visible).
+
+Gutter closure reads the latest set of lines-with-comments from a module-scoped
+ref (`leftSetRef` for the a-side, `linesWithCommentsRef` for the b-side and
+unified). A separate `useEffect` syncs the memoized `linesWithComments` into
+these refs whenever the comment list or active path changes. The `lineMarker`
+closure is called lazily on the next view update (scroll, doc change), so we
+DON'T need a Compartment reconfigure on every add / delete — the marker
+simply reads the new set on the next call. The `eq()` override keeps the
+marker identity stable when nothing changed, so CodeMirror doesn't re-paint
+unnecessarily.
+
+
+Popover positioning + dismiss
+-----------------------------
+
+`position: fixed` anchored to the marker's `getBoundingClientRect()`. The
+popover is to the right of the marker; `clampTop` / `clampLeft` keep it on
+screen. Resize listener re-clamps. A transparent full-screen overlay behind
+the popover captures outside clicks to dismiss.
+
+Keyboard: `Esc` closes, `⌘Enter` / `Ctrl+Enter` saves the draft.
+
+No `transform: translate(...)` on the popover (would land at sub-pixel
+offsets in WKWebView per CLAUDE.md). `top` / `left` only.
+
+
+QA scenarios
+------------
+
+The visual element is hard to verify in headless mode without a full Tauri
+dev environment (xterm + WKWebView + native window dragging). I verified the
+end-to-end logic by reading the produced code and tracing the data flow:
+
+**Scenario 1: Add inline diff comment**
+  1. User opens a diff tab → DiffPane mounts → mount useEffect loads diff
+     sides, creates `MergeView` with `a` and `b` editors, each with the
+     `buildCommentGutter` extension.
+  2. User clicks `[data-testid="diff-comment-add-<line>"]` → gutter's
+     `domEventHandlers.click` fires, reads line + side from the view,
+     `setPopover({ line, side, top, left })`.
+  3. DiffCommentPopover mounts with `mode = "new"`, draft = "" → focus
+     auto-jumps to textarea (useEffect on `mode.kind`).
+  4. User types "Please simplify", clicks `[data-testid="diff-comment-save"]`
+     → `save()` calls `addComment(wsId, path, side, line, "Please simplify")`
+     → store adds it, returns the id → `pushToast("Comment added", "success")`
+     → mode → "idle".
+  5. The store update triggers `useDiffComments(wsId)` selector → new array
+     → `linesWithComments` memo recomputes → the new line appears in the
+     right (or left) Set → ref sync useEffect writes it to the closure's
+     ref → next `lineMarker` call returns `CommentGutterMarker(num, true)`
+     → marker DOM re-renders with the accent-tinted filled icon.
+  ✓ Trace valid.
+
+**Scenario 2: Empty comment rejected**
+  1. Popover open, user clears the textarea, clicks Save.
+  2. `save()` calls `addComment(...)` with `""` → store trims, sees empty,
+     returns `null` (no state mutation, no toast).
+  3. `if (!id) { setError("Comment cannot be empty"); return; }` → error
+     state set, textarea border tints red, `[data-testid="diff-comment-error"]`
+     renders "Comment cannot be empty".
+  ✓ Trace valid. (The store action ALSO returns `null` rather than
+  throwing — the empty validation is the caller's signal to show the
+  inline error without losing focus on the textarea.)
+
+**Scenario 3: Comments persist across remount**
+  1. User adds a comment → store holds it under `diffComments[wsId]`.
+  2. User switches to another tab → DiffPane unmounts, MergeView destroyed.
+  3. User switches back → DiffPane remounts → `useDiffComments(wsId)` returns
+     the same array (the store didn't change) → `linesWithComments` memo
+     recomputes from the SAME inputs → same Sets → the mount effect's
+     `buildCommentGutter` returns the same marker instances → marker DOM
+     re-renders with `hasComment=true` for the saved line.
+  ✓ Trace valid. (No disk persistence — comments are session-only. Task 14
+  will round-trip the post-able ones through `gh api` and stamp `remote_id`
+  + `posted_at`.)
+
+**Bonus: Side-by-side ⇄ Unified side mapping**
+  - Side-by-side: a-editor (original) shows "left" comments only;
+    b-editor (modified) shows "right" comments only. Confirmed by reading
+    the `lineMarker` closure: `(side === "left" ? leftSetRef.current :
+    set).has(num)`.
+  - Unified: shows "right" comments only (the visible line numbers come
+    from the modified doc, which is the "right" side per the `DiffInlineComment`
+    schema).
+
+
+Build verification
+------------------
+
+$ npm run build
+> termic@0.8.2 build
+> tsc -b && vite build
+
+vite v8.0.13 building client environment for production...
+✓ 1810 modules transformed.
+dist/index.html                                                    0.43 kB │ gzip:   0.27 kB
+dist/assets/DiffPane-Cy1FBKUu.js                                  41.49 kB │ gzip:  13.77 kB
+dist/assets/EditorPane-Cwz6fFHf.js                               499.96 kB │ 187.26 kB
+dist/assets/index-RYMPQ5sl.js                                  2,117.40 kB │ gzip: 584.85 kB
+✓ built in 373ms
+
+No TS errors, no Vite warnings (other than the pre-existing
+chunks-larger-than-500kB notice that's not related to this task —
+pre-existing in the codebase since Monaco was rejected for CodeMirror).
+The DiffPane chunk grew from 32.30 kB → 41.49 kB (+9.2 kB) which is the
+custom gutter + popover code.
+
+Note: `cargo check` not required (no Rust changes — confirmed by
+reviewing the diff; only TS files touched).
+
+
+Things deliberately NOT done (per spec)
+---------------------------------------
+
+- No threaded replies. The popover supports ONE level of comment
+  editing per line (multiple comments on the same line are stored
+  but each is independent).
+- No GitHub posting. `addDiffComment` / `updateDiffComment` / `deleteDiffComment`
+  are local-only. Task 14 will add the `gh api` round-trip.
+- No OAuth / token fields.
+- Terminal PTY lifecycle untouched. The diff comment state lives in the
+  store, the popover lives in the diff tab; switching tabs doesn't
+  un/remount the TerminalPane (still uses visibility-toggle, see
+  CLAUDE.md "Keep terminals mounted across switches").
+
+
+data-testid summary
+-------------------
+
+| Selector                              | Element                                    |
+|---------------------------------------|--------------------------------------------|
+| `diff-comment-add-<line>`             | Gutter marker (every line, per-line data)  |
+| `diff-comment-overlay`                | Full-screen click-outside overlay          |
+| `diff-comment-textarea`               | Body editor textarea                       |
+| `diff-comment-save`                   | Save / Add button                          |
+| `diff-comment-cancel`                 | Cancel button                              |
+| `diff-comment-popover-delete`         | Delete button in popover footer            |
+| `diff-comment-new`                    | "+ Add comment" button when idle           |
+| `diff-comment-error`                  | Inline error message                       |
+| `diff-comment-item-<id>`              | Each comment `<li>` in the list            |
+| `diff-comment-edit-<id>`              | Per-item "Edit" button                     |
+| `diff-comment-delete-<id>`            | Per-item "Delete" button                   |

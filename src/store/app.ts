@@ -2,7 +2,7 @@
 // updates (immutable replacements, not in-place mutations).
 
 import { create } from "zustand";
-import type { Project, Workspace, Tab, TerminalTab } from "@/lib/types";
+import type { Project, Workspace, Tab, TerminalTab, GitHubStatus, DiffInlineComment, GitHubPullRequest, GitHubCheckRun } from "@/lib/types";
 import * as ipc from "@/lib/ipc";
 import { focusTerminalTab } from "@/lib/tabFocus";
 import { agentDisplayName } from "@/lib/agents";
@@ -76,6 +76,11 @@ interface AppState {
    *  pickers are never stranded before/without detection. Drives the
    *  install badge in Settings and the hide-uninstalled picker filter. */
   detectedClis: Record<string, import("@/lib/types").CliInfo>;
+  /** Latest snapshot of the local `gh` CLI — whether the binary is on
+   *  PATH and whether `gh auth status` succeeds for github.com. Null
+   *  until `refreshGithubStatus` first resolves (the IPC is fast but
+   *  still async; UI gates must tolerate the null state). */
+  githubStatus: GitHubStatus | null;
   /** Per-project spotlight: project_id → ws_id of the currently spotlighted
    *  workspace, or absent if none. Updated by spotlight://status events and
    *  hydrated from the Rust side on app start. Session-only (not persisted). */
@@ -83,12 +88,61 @@ interface AppState {
   /** Set or clear the spotlighted workspace for a project. */
   setSpotlight: (projectId: string, wsId: string | null) => void;
 
+  /** Per-workspace inline diff comments, keyed by workspace id. Survives
+   *  diff-tab remounts (lives in the store, not the tab). */
+  diffComments: Record<string, DiffInlineComment[]>;
+  /** Insert a new comment. Returns the new id, or null if the body is
+   *  empty so the caller can show the inline error. */
+  addDiffComment: (wsId: string, path: string, side: "left" | "right", line: number, body: string) => string | null;
+  /** Replace the body of an existing comment. Returns false on empty body
+   *  so the caller can show the inline error without losing focus. */
+  updateDiffComment: (id: string, body: string) => boolean;
+  /** Remove a comment by id. No-op if not found. */
+  deleteDiffComment: (id: string) => void;
+  /** Stamp a comment with its newly-assigned GitHub review-comment id
+   *  + ISO timestamp after `gh api` posts it. The popover uses the
+   *  truthiness of `remote_id` as the duplicate-post guard — once
+   *  set, the "Post to GitHub" button is hidden. No-op if the
+   *  comment id isn't found in any workspace. */
+  markDiffCommentPosted: (wsId: string, commentId: string, remoteId: number, postedAt: string) => void;
+
+  /** Per-workspace Checks-tab snapshot: PR + commit check-runs, fetched
+   *  via `github_pr_checks_fetch`. Lives in the store (not the tab) so
+   *  the data survives tab switches and re-fetches don't race the UI.
+   *  `pr: null` distinguishes "no PR for this branch" (success) from
+   *  "haven't fetched yet" (`fetchedAt: null`). */
+  prChecks: Record<string, {
+    pr: GitHubPullRequest | null;
+    checks: GitHubCheckRun[];
+    loading: boolean;
+    error: string | null;
+    fetchedAt: number | null;
+  }>;
+  /** Overwrite the Checks-tab snapshot for one workspace. Pass
+   *  `error: null` on success. Sets `loading: false` and stamps
+   *  `fetchedAt`. */
+  setPrChecks: (wsId: string, payload: {
+    pr: GitHubPullRequest | null;
+    checks: GitHubCheckRun[];
+    error: string | null;
+  }) => void;
+  /** Set just the loading flag (no other field change). Use this
+   *  when kicking off a fetch so the refresh button can disable
+   *  itself without overwriting the prior data. */
+  setPrChecksLoading: (wsId: string, loading: boolean) => void;
+  /** Drop the snapshot for one workspace (e.g. on workspace archive). */
+  clearPrChecks: (wsId: string) => void;
+
   // ── actions ──
   loadAll: () => Promise<void>;
   /** Re-probe each agent's command for installed-ness. Fired once at
    *  startup (App mount) and whenever Settings → Agent CLIs opens —
    *  deliberately NOT on every window focus. */
   refreshClis: () => Promise<void>;
+  /** Re-probe the local `gh` CLI for install + github.com auth. Fired
+   *  from `loadAll` (and the settings dialog can call it again after
+   *  the user runs `gh auth login`). */
+  refreshGithubStatus: () => Promise<void>;
   setActiveWorkspace: (id: string | null) => void;
   setView: (page: View["page"]) => void;
   openSettings: (tab?: View["settingsTab"], repoId?: string) => void;
@@ -203,7 +257,10 @@ export const useApp = create<AppState>((set, get) => ({
   collapsedWorkspaces: initialCollapsedWs as Record<string, boolean>,
   agents: [],
   detectedClis: {},
+  githubStatus: null,
   spotlightWsId: {},
+  diffComments: {},
+  prChecks: {},
 
   setSpotlight: (projectId, wsId) =>
     set(s => ({
@@ -211,6 +268,112 @@ export const useApp = create<AppState>((set, get) => ({
         ? { ...s.spotlightWsId, [projectId]: wsId }
         : Object.fromEntries(Object.entries(s.spotlightWsId).filter(([k]) => k !== projectId)),
     })),
+
+  addDiffComment: (wsId, path, side, line, body) => {
+    const trimmed = body.trim();
+    if (!trimmed) return null;
+    const id = crypto.randomUUID();
+    set(s => ({
+      diffComments: {
+        ...s.diffComments,
+        [wsId]: [...(s.diffComments[wsId] ?? []), { id, path, side, line, body: trimmed }],
+      },
+    }));
+    return id;
+  },
+
+  updateDiffComment: (id, body) => {
+    const trimmed = body.trim();
+    if (!trimmed) return false;
+    set(s => {
+      let touched = false;
+      const nextMap: Record<string, DiffInlineComment[]> = {};
+      for (const [wid, list] of Object.entries(s.diffComments)) {
+        let touchedHere = false;
+        const next = list.map(c => {
+          if (c.id === id) { touchedHere = true; return { ...c, body: trimmed }; }
+          return c;
+        });
+        if (touchedHere) { touched = true; nextMap[wid] = next; } else { nextMap[wid] = list; }
+      }
+      if (!touched) return s;
+      return { diffComments: nextMap };
+    });
+    return true;
+  },
+
+  deleteDiffComment: (id) => {
+    set(s => {
+      let touched = false;
+      const nextMap: Record<string, DiffInlineComment[]> = {};
+      for (const [wid, list] of Object.entries(s.diffComments)) {
+        const next = list.filter(c => c.id !== id);
+        if (next.length !== list.length) { touched = true; nextMap[wid] = next; } else { nextMap[wid] = list; }
+      }
+      if (!touched) return s;
+      return { diffComments: nextMap };
+    });
+  },
+
+  markDiffCommentPosted: (wsId, commentId, remoteId, postedAt) => {
+    set(s => {
+      const list = s.diffComments[wsId];
+      if (!list) return s;
+      let touched = false;
+      const next = list.map(c => {
+        if (c.id !== commentId) return c;
+        if (c.remote_id === remoteId && c.posted_at === postedAt) return c;
+        touched = true;
+        return { ...c, remote_id: remoteId, posted_at: postedAt };
+      });
+      if (!touched) return s;
+      return { diffComments: { ...s.diffComments, [wsId]: next } };
+    });
+  },
+
+  setPrChecks: (wsId, payload) => set(s => ({
+    prChecks: {
+      ...s.prChecks,
+      [wsId]: {
+        pr: payload.pr,
+        checks: payload.checks,
+        loading: false,
+        // Non-null error short-circuits the UI to the matching empty
+        // state; null means "data is fresh" regardless of whether
+        // the PR is null (branch has no PR — success) or the checks
+        // list is empty (PR has no checks yet).
+        error: payload.error,
+        fetchedAt: Date.now(),
+      },
+    },
+  })),
+
+  setPrChecksLoading: (wsId, loading) => set(s => {
+    const cur = s.prChecks[wsId];
+    // Avoid re-renders on identical loading state — same trick the
+    // setWorkState action uses (sticky-true after done, no-op
+    // transitions) so subscribers don't churn.
+    if (cur?.loading === loading) return s;
+    return {
+      prChecks: {
+        ...s.prChecks,
+        [wsId]: {
+          pr: cur?.pr ?? null,
+          checks: cur?.checks ?? [],
+          loading,
+          error: cur?.error ?? null,
+          fetchedAt: cur?.fetchedAt ?? null,
+        },
+      },
+    };
+  }),
+
+  clearPrChecks: (wsId) => set(s => {
+    if (!(wsId in s.prChecks)) return s;
+    const next = { ...s.prChecks };
+    delete next[wsId];
+    return { prChecks: next };
+  }),
 
   loadAll: async () => {
     // Pull projects + workspaces + settings (for the agent registry).
@@ -223,6 +386,10 @@ export const useApp = create<AppState>((set, get) => ({
       ipc.settingsLoad().catch(() => ({ agents: [] } as Partial<import("@/lib/types").Settings>)),
     ]);
     set({ projects, workspaces, agents: (settings.agents as import("@/lib/types").Agent[]) ?? [] });
+    // Fire-and-forget: probes `gh` PATH presence + auth. Non-blocking
+    // (the IPC itself is async on the Rust side); `githubStatus` stays
+    // null until it resolves and UI gates must tolerate that.
+    void get().refreshGithubStatus();
   },
 
   refreshClis: async () => {
@@ -233,6 +400,17 @@ export const useApp = create<AppState>((set, get) => ({
       set({ detectedClis: map });
     } catch {
       // Keep prior results; an empty map just means "show all".
+    }
+  },
+
+  refreshGithubStatus: async () => {
+    try {
+      const status = await ipc.githubStatus();
+      set({ githubStatus: status });
+    } catch {
+      // Keep prior snapshot; a transient IPC error shouldn't blank the
+      // UI. The previous status (often "not available" on a real
+      // miss) is a reasonable display.
     }
   },
 
@@ -813,13 +991,50 @@ export const useApp = create<AppState>((set, get) => ({
 // inside the selector — Zustand 5 / React 19 will warn (or worse, loop) on
 // non-cached snapshots. We use a shared EMPTY constant for the "no tabs" case.
 const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
+const EMPTY_DIFF_COMMENTS: DiffInlineComment[] = Object.freeze([]) as unknown as DiffInlineComment[];
+// Frozen fallback for the Checks-tab snapshot — when a workspace has
+// never been fetched, the selector returns this constant so the
+// reference identity stays stable across re-renders. The shape
+// matches `AppState.prChecks[wsId]`.
+const EMPTY_PR_CHECKS = Object.freeze({
+  pr: null,
+  checks: [] as GitHubCheckRun[],
+  loading: false,
+  error: null,
+  fetchedAt: null,
+}) as {
+  pr: GitHubPullRequest | null;
+  checks: GitHubCheckRun[];
+  loading: boolean;
+  error: string | null;
+  fetchedAt: number | null;
+};
 
 export const useActiveWorkspace = () => useApp(s => {
   const id = s.activeWorkspaceId;
   if (!id) return null;
   return s.workspaces.find(w => w.id === id) ?? null;
 });
+/** Look up a workspace by id (NOT necessarily the active one). The
+ *  DiffCommentPopover uses this to resolve `wsId` → `project_id` for
+ *  the `github_pr_post_diff_comment` IPC (the Rust side needs the
+ *  project to find the repo's root_path). Returns the same reference
+ *  Zustand already holds for the row, so the selector stays
+ *  referentially stable as long as the workspace row doesn't change.
+ *  Frozen `null` fallback so the popover's re-renders don't churn on
+ *  unrelated store updates. */
+export const useWorkspace = (wsId: string | null | undefined) =>
+  useApp(s => (wsId ? s.workspaces.find(w => w.id === wsId) ?? null : null));
 export const useWorkspaceTabs = (wsId: string | null | undefined) =>
   useApp(s => (wsId ? (s.tabs[wsId] ?? EMPTY_TABS) : EMPTY_TABS));
 export const useActiveTabId = (wsId: string | null | undefined) =>
   useApp(s => (wsId ? s.activeTab[wsId] : undefined));
+/** All diff comments for a workspace (flat list). Falls back to the frozen
+ *  EMPTY_DIFF_COMMENTS so the selector stays referentially stable. */
+export const useDiffComments = (wsId: string | null | undefined) =>
+  useApp(s => (wsId ? (s.diffComments[wsId] ?? EMPTY_DIFF_COMMENTS) : EMPTY_DIFF_COMMENTS));
+/** Checks-tab snapshot for a workspace. Falls back to EMPTY_PR_CHECKS
+ *  when the workspace has no entry (never fetched) so the selector
+ *  stays referentially stable. */
+export const usePrChecks = (wsId: string | null | undefined) =>
+  useApp(s => (wsId ? (s.prChecks[wsId] ?? EMPTY_PR_CHECKS) : EMPTY_PR_CHECKS));

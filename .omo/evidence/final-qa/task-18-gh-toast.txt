@@ -1,0 +1,64 @@
+TASK 18 — gh_unauthenticated → "Run gh auth login" toast
+============================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:622-644
+Subagent evidence: .omo/evidence/task-18-gh-toast.txt
+
+Code locations traced (end-to-end Rust → TS → toast):
+
+  1. Rust error prefix (src-tauri/src/lib.rs:6087-6093)
+       if lower.contains("not logged in")
+         || lower.contains("auth login")
+         || lower.contains("not authenticated")
+         || lower.contains("no oauth token") {
+           return anyhow!("gh_unauthenticated: {}", stderr.trim());
+       }
+     This branch fires when gh exits non-zero with any of the four
+     auth-not-signed-in phrases on stderr (covers the actual
+     "To log in, run: gh auth login" text, plus the
+     "you are not logged into any GitHub hosts" variant, plus
+     the older "no oauth token" wording).
+
+  2. Pin test (lib.rs:8074-8107 classify_gh_error_emits_stable_codes):
+       $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- classify_gh_error
+       test tests::classify_gh_error_emits_stable_codes ... ok
+     Asserts the exact "gh_unauthenticated: <stderr>" prefix the TS
+     side matches on.
+
+  3. TS normalization (src/lib/errors.ts:32-44)
+       export function ghErrorToToastText(error: string): GhToastMessage {
+         const code = codeOf(error);
+         switch (code) {
+           case "gh_unauthenticated":
+             return {
+               message: "Run `gh auth login` to connect to GitHub.",
+               severity: "info",
+             };
+     The toast text "Run `gh auth login` to connect to GitHub." matches
+     the QA scenario's expected "Run gh auth login" content. The
+     backticks render as inline code in the Toaster (a UI convention).
+
+  4. Call sites wired (4 sites):
+       - IssueImportDialog.tsx:208-209 (Task 9 fetch error path)
+       - PrCreateDialog.tsx:154-155 (Task 10 create error path)
+       - RightPanel.tsx:1706-1711 (Task 8/16 fetch error path —
+         Checks tab dedups by `${fetchedAt}:${err}` so we toast
+         exactly once per failed fetch)
+       - RightPanel.tsx:1876-1877 (Task 13 merge error path)
+       - DiffCommentPopover.tsx:206-207 (Task 14 post-to-GitHub
+         error path)
+
+  5. Click → toast flow (any of the 4 call sites):
+       User clicks Create PR / Merge / Post comment / Fetch issue
+       → IPC throws "gh_unauthenticated: …"
+       → catch block calls ghErrorToToastText(msg)
+       → pushToast(t.message, t.severity)
+       → Toaster renders the message with severity "info" (no
+         alarming red ring for a "this is the fix" message)
+
+VERDICT: PASS — the Rust side emits the exact "gh_unauthenticated:"
+prefix the TS helper matches on, the helper returns the exact
+"Run `gh auth login` to connect to GitHub." text the QA scenario
+asserts, and the path is wired in all four call sites (Create PR,
+Merge, Fetch issue, Post comment). The Rust unit test
+classify_gh_error_emits_stable_codes pins the wire prefix; the
+build is clean; no regressions in the 95-test suite.

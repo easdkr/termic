@@ -42,9 +42,13 @@ export type ShortcutId =
   | "open-shortcuts"
   | "file-finder"
   | "find-in-files"
-  | "broadcast";
+  | "broadcast"
+  | "pr-create"
+  | "issue-import"
+  | "open-checks"
+  | "open-history";
 
-export type ShortcutGroup = "Navigation" | "Tabs" | "Terminal" | "General";
+export type ShortcutGroup = "Navigation" | "Tabs" | "Terminal" | "General" | "GitHub";
 
 export interface ShortcutDef {
   id: ShortcutId;
@@ -113,9 +117,21 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
     defaultBinding: B("f", { cmd: true, shift: true }) },
   { id: "broadcast", group: "General", label: "Broadcast to agents",
     defaultBinding: B("b", { cmd: true, shift: true }) },
+
+  // GitHub — Task 20. All ⇧⌘ + free letters to dodge the long-standing
+  // ⌘1..9 / ⌘[/] / ⌘W / ⌘L / ⌘T / ⇧⌘[/] nav set. ⇧⌘P is fixed by the QA
+  // scenario (PR dialog); the others slot in next to it.
+  { id: "pr-create", group: "GitHub", label: "Create pull request",
+    hint: "Open the PR-create dialog for the active workspace", defaultBinding: B("p", { cmd: true, shift: true }) },
+  { id: "issue-import", group: "GitHub", label: "Import from issue URL",
+    hint: "Seed a new workspace from a GitHub or Linear issue", defaultBinding: B("i", { cmd: true, shift: true }) },
+  { id: "open-checks", group: "GitHub", label: "Open Checks tab",
+    hint: "Switch the right-panel footer to PR + commit checks", defaultBinding: B("k", { cmd: true, shift: true }) },
+  { id: "open-history", group: "GitHub", label: "Open history (archive)",
+    hint: "Browse archived workspaces; press again to return to dashboard", defaultBinding: B("h", { cmd: true, shift: true }) },
 ];
 
-export const GROUP_ORDER: ShortcutGroup[] = ["Navigation", "Tabs", "Terminal", "General"];
+export const GROUP_ORDER: ShortcutGroup[] = ["Navigation", "Tabs", "Terminal", "General", "GitHub"];
 
 export type BindingMap = Record<ShortcutId, Binding>;
 

@@ -6,7 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Workspace, CreateWorkspaceArgs, CreateMultiArgs, Settings, DiscoveredRepo,
-  ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig,
+  ImportableWorktree, CliInfo, ChangeFile, Changes, FileEntry, Agent, RepoConfig, GitHubStatus,
+  PullRequestWithChecks, IssueSeed, GitHubPullRequest,
 } from "./types";
 
 // ───────────────────────────── projects ─────────────────────────────
@@ -22,6 +23,22 @@ export const projectUpdate  = (p: Project) => invoke<void>("project_update", { p
 export const projectRemove  = (id: string) => invoke<void>("project_remove", { id });
 export const projectReorder = (ids: string[]) => invoke<void>("project_reorder", { ids });
 export const projectRename  = (id: string, name: string) => invoke<void>("project_rename", { id, name });
+
+/** Add a {name, target_path} entry to `Project.external_dir_links`. */
+export const externalDirLinkAdd = (
+  projectId: string, name: string, targetPath: string,
+) => invoke<Project>("external_dir_link_add", { projectId, name, targetPath });
+
+/** Remove a link by name. Does not touch existing symlinks. */
+export const externalDirLinkRemove = (
+  projectId: string, name: string,
+) => invoke<Project>("external_dir_link_remove", { projectId, name });
+
+/** Re-create `external_dir_links` symlinks in every active workspace
+ *  of the project that owns `workspaceId`. Returns a list of human
+ *  readable result lines. */
+export const workspaceRepairLinks = (workspaceId: string) =>
+  invoke<string[]>("workspace_repair_links", { workspaceId });
 
 // ───────────────────────────── workspaces ─────────────────────────────
 
@@ -50,6 +67,13 @@ export const workspaceImportWorktree = (
     sandboxAllowedHosts: sandbox?.allowedHosts,
   });
 export const workspaceArchive  = (id: string, deleteBranch?: boolean) => invoke<void>("workspace_archive", { id, deleteBranch });
+/** Re-create the on-disk worktree for an archived workspace and flip
+ *  `archived=false`. Rejects on repo-root workspaces, non-git
+ *  projects, and when the saved branch no longer exists in the
+ *  project's repo (the workspace stays archived in that case). The
+ *  caller is expected to `useApp.loadAll()` after success so the new
+ *  row appears in the sidebar and disappears from History. */
+export const workspaceRestore  = (id: string) => invoke<Workspace>("workspace_restore", { id });
 export const workspaceDelete   = (id: string) => invoke<void>("workspace_delete", { id });
 export const workspaceSetCli   = (id: string, cli: string) => invoke<void>("workspace_set_cli", { id, cli });
 /** Update a custom-command workspace's launch command (multiline bash
@@ -319,6 +343,145 @@ export const agentsSave    = (agents: Agent[]) => invoke<void>("agents_save", { 
 export const discoverRepos = (dir: string) => invoke<DiscoveredRepo[]>("discover_repos", { dir });
 export const detectClis    = () => invoke<CliInfo[]>("detect_clis");
 export const listMonospaceFonts = () => invoke<string[]>("list_monospace_fonts");
+/** Snapshot of the local `gh` CLI: whether the binary is on PATH and
+ *  whether `gh auth status` succeeds for github.com. Cheap (one `which`
+ *  + at most one `gh auth status`); called from `loadAll` so the UI
+ *  can gate GitHub affordances (PR create, issue paste, …) without
+ *  blocking startup. Never stores tokens — username only. */
+export const githubStatus  = () => invoke<GitHubStatus>("github_status");
+/** `GithubStatus` alias (camelCase) — same shape as the `GitHubStatus`
+ *  interface in types.ts. */
+export type GithubStatus = GitHubStatus;
+
+/** Pull the PR metadata + commit check-runs for the workspace's branch.
+ *  Runs `gh pr view <branch> --json …` + `gh pr checks <branch> --json …`
+ *  in the project's `root_path` (the live checkout, not the worktree).
+ *  Returns `{ pr: null, checks: [] }` when the branch has no associated
+ *  PR — the success case, not an error. Error messages are prefixed
+ *  with stable codes the UI matches on for the right empty state:
+ *  `gh_unavailable:`, `gh_unauthenticated:`, `rate_limited:`. Async +
+ *  spawn_blocking on the Rust side — the two `gh` subprocesses can
+ *  take a few hundred ms on a cold PATH. */
+export const githubPrChecksFetch = (projectId: string, branch: string) =>
+  invoke<PullRequestWithChecks>("github_pr_checks_fetch", { projectId, branch });
+
+/** Fetch a GitHub issue's title + body for the issue-import dialog.
+ *  Accepts `https://github.com/<owner>/<repo>/issues/<n>` URLs
+ *  (case-insensitive host, strict path — no trailing slash, no
+ *  query, no fragment). Rejects Linear URLs with
+ *  "Linear authentication not configured" and everything else with
+ *  "Unsupported issue URL: …". Error prefix uses the same stable
+ *  codes as `githubPrChecksFetch` (`gh_unavailable:` /
+ *  `gh_unauthenticated:` / `rate_limited:` / `gh_error:`). Async +
+ *  spawn_blocking on the Rust side — a cold `gh api` against an
+ *  uncached repo can take a few hundred ms. */
+export const githubIssueFetch = (url: string) =>
+  invoke<IssueSeed>("github_issue_fetch", { url });
+
+/** Fetch a Linear issue's title + body for the issue-import dialog.
+ *  Task 15 of the termic-vs-conductor plan. The dialog pre-detects
+ *  Linear URLs client-side (regex mirror of `parse_issue_url` in
+ *  lib.rs) and calls this with the bare issue id (e.g. `ENG-1234`
+ *  or a UUID). The Rust side validates the id is non-empty and
+ *  ALWAYS returns `Err("Linear authentication not configured")` in
+ *  the MVP — Linear's public-by-default issue pages require an API
+ *  token for the GraphQL endpoint, and the plan spec is explicit
+ *  about not adding Linear OAuth or token storage. The dialog
+ *  surfaces the Err string verbatim, so the user sees the
+ *  same error whether the URL is public or private. A future PR
+ *  can swap the body for a real GraphQL call without changing the
+ *  IPC shape or the dialog. Async + `spawn_blocking` on the Rust
+ *  side — matches `githubIssueFetch`'s shape. */
+export const linearIssueFetch = (issueId: string) =>
+  invoke<IssueSeed>("linear_issue_fetch", { issueId });
+
+/** Create a PR (draft or regular) on GitHub via `gh pr create`. The
+ *  Rust side runs the create + a follow-up `gh pr view` in series
+ *  and round-trips the freshly-created PR into a `GitHubPullRequest`
+ *  so the dialog's success path can show the URL + title + draft
+ *  chip without a second fetch. Error messages carry the same
+ *  stable code prefixes the rest of the `gh` surface uses
+ *  (`gh_unavailable:` / `gh_unauthenticated:` / `rate_limited:` /
+ *  `gh_error:`); the dialog does `err.split(":", 1)[0]` to pick
+ *  the right inline message. The backend trims the title and
+ *  rejects it when empty, but the dialog also enforces that
+ *  client-side so the user gets instant feedback. `body` is
+ *  always passed (empty body is allowed — `gh` tolerates it). */
+export const githubPrCreate = (args: {
+  projectId: string;
+  title: string;
+  body: string;
+  base: string;
+  head: string;
+  draft: boolean;
+}) =>
+  invoke<GitHubPullRequest>("github_pr_create", {
+    projectId: args.projectId,
+    title: args.title,
+    body: args.body,
+    base: args.base,
+    head: args.head,
+    draft: args.draft,
+  });
+
+/** Merge a pull request via `gh pr merge <n> --<method> --delete-branch`.
+ *  `method` is one of `"merge" | "squash" | "rebase"` (validated on the
+ *  Rust side; any other value returns an error from the IPC). The Rust
+ *  side always passes `--delete-branch` — there's no IPC arg to opt out;
+ *  the user's whole point of merging is to land the work, and a merged
+ *  branch is dead weight in the remote. Success returns the trimmed
+ *  `gh` stdout (usually "Merged pull request #N") — the Checks tab
+ *  ignores it for now, but the field is there for a future "Merge
+ *  details" panel without re-shelling. Errors carry the same
+ *  `<code>: <message>` prefixes the rest of the `gh` surface uses; the
+ *  Merge button does `err.split(":", 1)[0]` to pick the right toast
+ *  copy. Async + `spawn_blocking` on the Rust side — the merge itself
+ *  can take a few seconds (GitHub has to fast-forward / squash / rebase),
+ *  and the user might trigger it on a slow network. */
+export const githubPrMerge = (args: {
+  projectId: string;
+  prNumber: number;
+  method: "merge" | "squash" | "rebase";
+}) =>
+  invoke<string>("github_pr_merge", {
+    projectId: args.projectId,
+    prNumber: args.prNumber,
+    method: args.method,
+  });
+
+/** Post a local diff comment to a PR as a GitHub review comment via
+ *  `gh api repos/<owner>/<repo>/pulls/<n>/comments`. The Rust side
+ *  shells out to `gh repo view` to discover the owner/repo and then
+ *  `gh api` to POST the comment. Returns the new GitHub review-comment
+ *  id; the caller stamps it on the local `DiffInlineComment.remote_id`
+ *  (and `posted_at`) so the popover hides the "Post to GitHub" button
+ *  on retry — that's the duplicate-post guard. Validation: `side` must
+ *  be `"left" | "right"`, `line > 0`, `commitId` is a 40-char SHA1 hex
+ *  string. The Rust validator is the authoritative gate (it gives
+ *  clearer errors than the 422s `gh api` would surface), but the
+ *  popover also pre-validates for instant UX feedback. Errors carry
+ *  the same `<code>: <message>` prefixes the rest of the `gh` surface
+ *  uses (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+ *  `gh_error`); the popover maps the prefix to a toast kind. Async +
+ *  `spawn_blocking` on the Rust side — two `gh` subprocesses. */
+export const githubPrPostDiffComment = (args: {
+  projectId: string;
+  prNumber: number;
+  commitId: string;
+  path: string;
+  line: number;
+  side: "left" | "right";
+  body: string;
+}) =>
+  invoke<number>("github_pr_post_diff_comment", {
+    projectId: args.projectId,
+    prNumber: args.prNumber,
+    commitId: args.commitId,
+    path: args.path,
+    line: args.line,
+    side: args.side,
+    body: args.body,
+  });
 
 // ───────────────────────────── misc ─────────────────────────────
 

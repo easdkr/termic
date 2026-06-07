@@ -1,0 +1,292 @@
+Task 15 — Linear issue URL support
+===================================
+
+Files changed
+-------------
+
+Backend (Rust):
+  - src-tauri/src/lib.rs
+      * New types near `IssueSeed` (line 393):
+        - `IssueUrlKind { Github, Linear }` — `#[serde(rename_all
+          = "snake_case")]` enum matching the file's wire
+          convention (Task 1's `IssueSource` uses the same pattern).
+        - `ParsedIssueUrl { kind, github: Option<(String, String,
+          u64)>, linear: Option<String> }` — struct-of-options
+          result. Flat wire format (no enum-with-payload) so the
+          dialog regex mirror can construct the same shape on the
+          TS side without touching enum variants.
+      * New:  `parse_issue_url(url) -> Result<ParsedIssueUrl,
+        String>` (line 6248). Accepts BOTH GitHub and Linear
+        schemes. The GitHub branch delegates to the existing
+        `parse_github_issue_url` (so all of Task 9's per-segment
+        validation is reused — owner/repo charset, segment count,
+        positive integer, no query/fragment, etc.). The Linear
+        branch is hand-rolled for the same reason as Task 9's
+        GitHub parser (`url::Url` is too permissive + uniform-
+        errored). `#[allow(dead_code)]` with a comment — the only
+        production caller is a future unified `IssueFetch` IPC;
+        today the function is exercised by the
+        `parse_issue_url_handles_both_schemes` unit test only
+        (Rust's `dead_code` analysis doesn't count
+        `#[cfg(test)]` references, hence the allow).
+      * New:  `linear_issue_fetch_blocking(issue_id) -> Result<
+        IssueSeed, String>` (line 6302). MVP behavior: trims the
+        id, rejects empty, then ALWAYS returns `Err("Linear
+        authentication not configured")`. A future PR can swap the
+        body for a real GraphQL call (with a per-workspace,
+        per-session token prompt or a system keychain lookup)
+        without changing the IPC shape.
+      * New:  `#[tauri::command] async fn linear_issue_fetch(
+        issue_id) -> Result<IssueSeed, String>` (line 6316). Async
+        + `tauri::async_runtime::spawn_blocking` per the long-
+        running-IPC discipline. Mirrors `github_issue_fetch`'s
+        shape exactly.
+      * Wired in `invoke_handler` next to `github_issue_fetch`
+        (line 7134).
+      * New:  1 unit test:
+        - `parse_issue_url_handles_both_schemes` — covers Linear
+          happy path (`ENG-1234` form + UUID form + case-
+          insensitive host + whitespace padding), GitHub
+          regression (delegates to `parse_github_issue_url` and
+          returns the same payload), 22 invalid URLs (empty,
+          wrong scheme, unknown host, wrong GitHub path, wrong
+          Linear path, empty workspace, invalid workspace chars,
+          id too short, invalid id chars), AND the
+          `ParsedIssueUrl` wire format round-trip (snake_case
+          `kind` enum, `github: null`, `linear: "ENG-1234"`).
+
+Frontend (TypeScript):
+  - src/lib/ipc.ts
+      * New:  `linearIssueFetch(issueId) => invoke<IssueSeed>(
+        "linear_issue_fetch", { issueId })`. Same shape as
+        `githubIssueFetch`. JSDoc explains the MVP behavior +
+        future extensibility.
+  - src/components/dialogs/IssueImportDialog.tsx
+      * New:  `DetectedIssueUrl` discriminated union + `detectIssueUrl`
+        helper. The dialog uses this client-side regex mirror of
+        `parse_issue_url` to route to the right IPC:
+        - `https?://github.com/...` → `githubIssueFetch(url)` (any
+          github.com URL; the Rust parser gives precise errors for
+          invalid shapes).
+        - `https?://linear.app/<ws>/issue/<id>` (where id matches
+          `[A-Za-z0-9-]{3,}`) → `linearIssueFetch(issueId)` with
+          the captured id.
+        - Anything else → "Unsupported issue URL: …" inline
+          (client-side, no IPC call).
+      * `doFetch` updated: pre-detect → if "unknown" show the
+        error inline; if "linear" call `linearIssueFetch(id)`; if
+        "github" call `githubIssueFetch(url)` (Task 9 regression
+        preserved exactly).
+      * Helper text below URL input: "GitHub issues work via the
+        gh CLI. Linear URLs are recognized but require auth (not
+        yet configured)." (replaces Task 9's "Linear support lands
+        in a later release.").
+      * Placeholder updated to hint at both schemes:
+        "https://github.com/owner/repo/issues/123 or https://
+        linear.app/..."
+      * File header updated to mention Task 9 + Task 15.
+
+URL parser rules
+----------------
+
+`parse_issue_url` (authoritative, server-side) + the
+`detectIssueUrl` regex mirror (client-side, for routing):
+
+  GitHub:
+    https://github.com/<owner>/<repo>/issues/<n>
+    - scheme MUST be `https://` (the dialog's pre-detection also
+      accepts `http://` and routes to GitHub IPC, where the Rust
+      parser rejects it for "Unsupported issue URL: ... (expected
+      https)". A pre-validation could short-circuit but the
+      existing Task 9 behavior surfaces the IPC's more precise
+      error).
+    - host MUST be `github.com` (case-insensitive, WHATWG)
+    - path MUST be EXACTLY 4 segments: owner, repo, "issues", n
+    - owner + repo chars: `[A-Za-z0-9._-]+`
+    - issue number: positive integer (1, 2, 3, …); 0 is rejected
+    - no trailing slash, no extra path segments, no query string,
+      no fragment
+    - leading/trailing whitespace stripped
+    - GitHub.com PR URLs (`/pulls/<n>`) are rejected (segment
+      count check fails)
+
+  Linear:
+    https://linear.app/<workspace>/issue/<id>
+    - scheme MUST be `https://` (the dialog regex mirror accepts
+      `http://` to mirror the GitHub branch's permissiveness, but
+      the Rust side only accepts `https://` for the Linear
+      branch).
+    - host MUST be `linear.app` (case-insensitive)
+    - path MUST be EXACTLY 3 segments: workspace, "issue", id
+    - workspace chars: `[A-Za-z0-9._-]+` (same charset as GitHub
+      owner/repo — covers the rare workspace names with dots or
+      underscores)
+    - id chars: `[A-Za-z0-9-]+` (covers `ENG-1234` team-key form
+      + UUID form)
+    - id length floor: 3 (catches `E` and `E-` and other
+      gibberish)
+    - no trailing slash, no extra path segments, no query string,
+      no fragment
+
+  Unknown (anything else):
+    → "Unsupported issue URL: <url>" (client-side, no IPC call).
+    The dialog's helper text + the inline error banner make the
+    UX consistent with Task 9's "this isn't an issue URL" path.
+
+MVP behavior
+------------
+
+`linear_issue_fetch(issueId)` ALWAYS returns:
+
+  Err("Linear authentication not configured")
+
+regardless of:
+  - whether the issue id is a real `ENG-1234` or a UUID
+  - whether the underlying Linear issue is public or private
+  - whether the user has a Linear token in the system keychain
+    (we don't check — no token storage at all)
+  - whether `gh` is installed (Linear is a separate service;
+    `gh` has no Linear integration)
+
+The plan spec is explicit: "Do not add Linear OAuth or token
+storage." and "If Linear cannot be read without auth, surface
+clear unsupported/auth-required error." This MVP behavior
+satisfies both — the user sees the exact same error whether
+they pasted a public or private URL.
+
+Future extensibility (documented in the IPC's doc comment):
+  1. Swap `linear_issue_fetch_blocking`'s body for a real
+     `graphql` POST to `https://api.linear.app/graphql` using
+     a per-workspace token (from the system keychain, prompted
+     once per session).
+  2. Add an `IssueSeed { source: IssueSource::Linear, ... }`
+     with the fetched title + body.
+  3. No change to the dialog, the IPC shape, or the parser.
+  4. Re-export the `linear_issue_fetch` doc comment in the
+     changelog (it already explains the MVP → production
+     trajectory).
+
+QA scenarios — verification approach
+------------------------------------
+
+This task is agent-executable rather than UI-executable (no
+Playwright in scope). Verification is by reading the produced
+code + the test output. Each plan scenario maps to a code/test
+assertion:
+
+  Scenario: Linear public URL parsed (QA1)
+    Preconditions: MVP behavior (always reject)
+    Steps: 1. Open the issue import dialog 2. Paste
+      `https://linear.app/termic/issue/ENG-1234` 3. Click Fetch
+    Expected: Error contains "Linear authentication not configured"
+    Evidence (client-side regex):
+      detectIssueUrl("https://linear.app/termic/issue/ENG-1234")
+      → { kind: "linear", issueId: "ENG-1234" }
+      (covered by the dialog's `detectIssueUrl` helper; same
+      regex mirror in `parse_issue_url_handles_both_schemes`
+      test case for the Rust side)
+    Evidence (IPC):
+      linearIssueFetch("ENG-1234")
+      → invoke<IssueSeed>("linear_issue_fetch", { issueId: "ENG-1234" })
+      → Tauri command → spawn_blocking → linear_issue_fetch_blocking
+      → Err("Linear authentication not configured")
+      (covered by the doc comment + the wire shape is the same
+      as githubIssueFetch; the Rust test pins the
+      parse_issue_url_handles_both_schemes linear happy path)
+
+  Scenario: Private Linear URL fails clearly (QA2)
+    Preconditions: same MVP behavior
+    Steps: 1. Paste a private Linear URL
+      `https://linear.app/termic/issue/0a1b2c3d-4e5f-6789-abcd-ef0123456789`
+      2. Click Fetch
+    Expected: Error contains "Linear authentication not configured"
+    Evidence: identical to QA1 — the MVP behavior doesn't
+      distinguish public vs private, so the user sees the same
+      error either way. The Rust test
+      `parse_issue_url_handles_both_schemes` covers the UUID id
+      form.
+
+  Scenario: GitHub URL still works (regression)
+    Steps: 1. Paste a GitHub URL
+      `https://github.com/acme/app/issues/42` 2. Click Fetch
+    Expected: The Task 9 behavior is preserved (no regression)
+    Evidence:
+      - detectIssueUrl returns { kind: "github" } for any
+        `https?://github.com/...` URL.
+      - doFetch calls `githubIssueFetch(url.trim())` — same as
+        Task 9 (line 118 of the dialog before my changes).
+      - The existing `parse_github_issue_url_recognises_supporte
+        d_schemes` test still passes (no regression on the
+        parser side).
+      - The new `parse_issue_url_handles_both_schemes` test
+        case "GitHub positive cases (regression — Task 9
+        contract)" exercises the unified parser's GitHub path
+        and pins the delegated result.
+
+  Scenario: Unsupported URL surfaces "Unsupported issue URL"
+    Steps: 1. Paste `https://example.com/nope` 2. Click Fetch
+    Expected: Error contains "Unsupported issue URL"
+    Evidence:
+      - detectIssueUrl returns { kind: "unknown", reason: "unsupported" }
+      - doFetch sets fetchState to "err" with message
+        "Unsupported issue URL: https://example.com/nope" and
+        returns BEFORE any IPC call.
+      - The error banner renders the message verbatim.
+      - The Rust test
+        `parse_issue_url_handles_both_schemes` pins
+        "Unsupported issue URL: ..." for `https://example.com/nope`
+        as a regression guarantee.
+
+Build / cargo status
+--------------------
+
+  $ cargo check --manifest-path src-tauri/Cargo.toml
+      Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.32s
+      (no warnings; the `parse_issue_url` dead_code warning was
+      silenced with `#[allow(dead_code)]` + a comment explaining
+      the test-only usage + future unified-dispatcher use)
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib
+      test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+      (94 prior + 1 new — `parse_issue_url_handles_both_schemes`)
+
+  $ cargo test --manifest-path src-tauri/Cargo.toml --lib issue
+      running 4 tests
+      test tests::issue_seed_wire_format_round_trips ... ok
+      test tests::parse_github_issue_url_recognises_supported_schemes ... ok
+      test tests::parse_issue_url_handles_both_schemes ... ok
+      test tests::pr_checks_wire_format_round_trips ... ok (unrelated, name match)
+      test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out
+
+  $ npm run build
+      vite v8.0.13 building client environment for production...
+      ✓ 1812 modules transformed.
+      dist/assets/index-MFqFhO2E.js                                  2,144.36 kB │ gzip: 590.97 kB
+      ✓ built in 384ms
+      (no TypeScript errors; the >500 kB chunk warning is pre-existing,
+       unrelated to this task; module count went from 1811 → 1812
+       because the dialog now imports `linearIssueFetch`)
+
+Notes
+-----
+
+  - The dialog does NOT auto-spawn the agent's first prompt with
+    the issue body. Same as Task 9 — the body flows only into
+    the "Use as setup note" checkbox path. Task 14 wired the
+    body into the agent's first prompt for GitHub; the Linear
+    MVP never gets that far (always rejects).
+  - No OAuth. The IPC takes a bare id and returns the MVP
+    rejection. No token storage, no settings UI for tokens, no
+    keychain integration.
+  - No remote mutation. The Rust side never writes to Linear.
+  - PTY lifecycle untouched. The dialog creates a workspace;
+    the first PTY is mounted by the existing `WorkspaceView`
+    mount effect (no change to that path). The new IPC is a
+    pure URL-validation + rejection surface, no subprocess.
+  - The "GitHub IPC used to call `parse_github_issue_url`"
+    pattern is preserved — the unified parser delegates to
+    the GitHub parser, so the existing Task 9 linear.app
+    short-circuit ("Linear authentication not configured" via
+    `parse_github_issue_url`) still fires as a defense-in-depth
+    fallback if the dialog ever routed a Linear URL to the
+    GitHub IPC by mistake.

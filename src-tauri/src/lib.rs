@@ -107,6 +107,17 @@ pub struct Project {
     /// existing project + the `Default` impl stay git-backed.
     #[serde(default)]
     pub non_git: bool,
+
+    /// Project-level references to directories on disk that the user
+    /// wants the workspace's file tree to expose alongside the
+    /// worktree. Each entry is a stable, user-chosen name + an
+    /// absolute path. The sandbox / worktree itself is untouched —
+    /// these are virtual, read-only-ish links. Persisted on the
+    /// Project so they survive workspace archive + recreate.
+    /// `#[serde(default)]` so projects.json rows written before this
+    /// field existed still deserialize.
+    #[serde(default)]
+    pub external_dir_links: Vec<ExternalDirLink>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -282,6 +293,168 @@ pub enum MemberMode {
     RepoRoot,
 }
 
+// ───────────────────────────── shared feature types (Task 1) ─────────────────────────────
+//
+// Persistence shapes shared with the frontend (`src/lib/types.ts`).
+// All are `#[serde(default)]` so adding a new field to an existing
+// on-disk struct (`Project`, `Settings`) can't break pre-existing
+// files. Snake_case field names match the JSON contract the TS side
+// expects.
+
+/// A user-named pointer to a directory outside the worktree that the
+/// file tree should surface as if it were a sibling of the worktree
+/// contents. Persisted on `Project.external_dir_links`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ExternalDirLink {
+    /// Display name shown in the file tree. Unique within a project.
+    pub name: String,
+    /// Absolute path to the directory on disk.
+    pub target_path: String,
+}
+
+/// One row in a PR's "Checks" panel. Mirrors the `check_runs[]`
+/// payload returned by GitHub's REST API (subset of fields we
+/// actually surface in the UI).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubCheckRun {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    /// Null while the check is still queued / running.
+    pub conclusion: Option<String>,
+    pub started_at: String,
+    /// Null while the check is still running.
+    pub completed_at: Option<String>,
+    pub html_url: String,
+}
+
+/// Snapshot of a pull request we show alongside a workspace. Pulled
+/// via `gh pr view --json ...` — no token persisted, no OAuth.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubPullRequest {
+    pub number: u64,
+    pub title: String,
+    /// Null when the PR body is empty on the GitHub side.
+    pub body: Option<String>,
+    pub state: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub html_url: String,
+    pub draft: bool,
+    /// SHA of the PR's head commit. Optional because older `gh`
+    /// versions don't expose `headRefOid`; the popover disables
+    /// "Post to GitHub" when None. `head_ref` is the branch NAME,
+    /// not a commit, so we can't fall back to it.
+    pub head_sha: Option<String>,
+    /// Derived: every `check_run` has a non-failing conclusion. `None`
+    /// when no checks have run yet (UI shows a neutral state).
+    pub checks_passing: Option<bool>,
+}
+
+/// Bundle returned by `github_pr_checks_fetch` — the PR metadata for the
+/// workspace's branch plus the flat list of commit check-runs that belong
+/// to it. The PR can be null when the branch has no associated PR
+/// (empty-state in the UI). Checks are always returned (possibly empty)
+/// regardless of PR presence so the UI doesn't need a second fetch.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PullRequestWithChecks {
+    pub pr: Option<GitHubPullRequest>,
+    pub checks: Vec<GitHubCheckRun>,
+}
+
+/// Source of an `IssueSeed` — which external system the import
+/// dialog parsed the URL from. Persisted on the workspace as a
+/// breadcrumb the agent reads on first spawn.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueSource {
+    #[default]
+    Github,
+    Linear,
+}
+
+/// Input shape for "seed a workspace from an issue". Filled in by
+/// the issue-import dialog; persisted on the workspace as the
+/// breadcrumb the agent reads on first spawn.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct IssueSeed {
+    pub source: IssueSource,
+    pub url: String,
+    pub title: String,
+    /// Null when the issue body is empty.
+    pub body: Option<String>,
+}
+
+/// Result of `parse_issue_url` — the parsed kind plus the kind-specific
+/// payload. The dialog uses this client-side (via a regex mirror) to
+/// route to the right IPC; the Rust side keeps `parse_issue_url` as
+/// the authoritative parser so the helper is unit-testable and any
+/// future "unified" path (e.g. a `IssueFetch` that takes a URL and
+/// dispatches) has one canonical entry point. The `kind` field is
+/// snake_case on the wire to match the rest of the file's wire
+/// convention — Task 1's `IssueSource` uses the same pattern.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueUrlKind {
+    Github,
+    Linear,
+}
+
+/// Parsed result of `parse_issue_url`. Exactly one of `github` or
+/// `linear` is `Some` — the parser never returns a hybrid. The shape
+/// (struct-of-options) is intentional over an enum-with-payload so
+/// the JSON wire format is flat and easy for a regex mirror in the
+/// dialog to construct without touching enum variants. `kind` is
+/// always present and redundant with the `Some` field; future
+/// `IssueSource` values (GitLab, Jira, …) just add another option
+/// variant and another `Some` field.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedIssueUrl {
+    pub kind: IssueUrlKind,
+    /// `(owner, repo, number)` when `kind == Github`.
+    pub github: Option<(String, String, u64)>,
+    /// The Linear issue id (e.g. `ENG-1234` or a UUID) when
+    /// `kind == Linear`.
+    pub linear: Option<String>,
+}
+
+/// Which side of a diff a `DiffInlineComment` is anchored to. Maps
+/// 1:1 to the GitHub `side` parameter on the review-comments API.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// One inline review comment anchored to a diff hunk. Lives in
+/// workspace-scoped state (NOT the on-disk `Workspace` struct — a
+/// workspace can accumulate many of these), but the shape is
+/// defined here so frontend + Rust agree.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DiffInlineComment {
+    /// Local UUID, assigned at draft time.
+    pub id: String,
+    /// Repo-relative file path. Matches `DiffTab.path`.
+    pub path: String,
+    /// 1-based line number within the chosen side.
+    pub line: u32,
+    pub side: DiffSide,
+    pub body: String,
+    /// GitHub review-comment id, populated after `gh api` posts it.
+    /// `None` while the comment is still local.
+    pub remote_id: Option<u64>,
+    /// ISO-8601 timestamp of when `remote_id` was assigned.
+    pub posted_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateWorkspaceArgs {
     pub project_id: String,
@@ -311,6 +484,15 @@ pub struct CreateWorkspaceArgs {
     pub sandbox_rw_paths: Option<Vec<String>>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Option<Vec<String>>,
+    /// Optional setup-script override for THIS workspace. When set
+    /// (non-empty after trim), bypasses the project-level
+    /// `effective_scripts` lookup and runs this string instead.
+    /// Used by the issue-import flow (Task 9) so the fetched issue
+    /// body can be seeded as a setup note. Unset / empty = normal
+    /// project-derived setup script (including "no script" when the
+    /// project has none).
+    #[serde(default)]
+    pub setup_script: Option<String>,
 }
 
 // ───────────────────────────── paths ─────────────────────────────
@@ -482,6 +664,39 @@ pub struct SandboxStatus {
 pub struct SpawnResult {
     id: String,
     sandbox: SandboxStatus,
+}
+
+fn is_utf8_locale(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    upper.contains("UTF-8") || upper.contains("UTF8")
+}
+
+fn utf8_locale_defaults(
+    parent_env: &HashMap<String, String>,
+    spawn_env: &HashMap<String, String>,
+) -> Vec<(&'static str, String)> {
+    if spawn_env.contains_key("LC_ALL") || parent_env.contains_key("LC_ALL") {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let lang = spawn_env
+        .get("LANG")
+        .or_else(|| parent_env.get("LANG"))
+        .filter(|v| is_utf8_locale(v))
+        .cloned()
+        .unwrap_or_else(|| "en_US.UTF-8".into());
+
+    if !spawn_env.contains_key("LANG") && !parent_env.contains_key("LANG") {
+        out.push(("LANG", lang.clone()));
+    }
+    if !spawn_env.contains_key("LC_CTYPE") {
+        match parent_env.get("LC_CTYPE") {
+            Some(v) if is_utf8_locale(v) => {}
+            _ => out.push(("LC_CTYPE", lang)),
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -741,7 +956,8 @@ fn pty_spawn(
     // Inherit ALL parent env first — agents need ANTHROPIC_API_KEY,
     // GEMINI_API_KEY, OPENAI_API_KEY, HTTPS_PROXY, etc. The user's per-spawn
     // `env` overlay then takes precedence for known keys like TERMIC_*.
-    for (k, v) in std::env::vars() {
+    let parent_env: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in &parent_env {
         cmd.env(k, v);
     }
     // Override the inherited PATH with the login-shell-resolved one.
@@ -750,6 +966,12 @@ fn pty_spawn(
     // ~/.bun/bin, /opt/homebrew/bin, or under nvm aren't found. See
     // shell_env.rs.
     cmd.env("PATH", shell_env::resolved_path());
+    // GUI-launched macOS apps often have no LANG/LC_CTYPE. The byte path is
+    // already UTF-8, but shells/readline need a UTF-8 locale to edit Korean
+    // and other multibyte input correctly inside the PTY.
+    for (k, v) in utf8_locale_defaults(&parent_env, &args.env) {
+        cmd.env(k, v);
+    }
     for (k, v) in &args.env {
         cmd.env(k, v);
     }
@@ -1035,6 +1257,7 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         members: Vec::new(),
         spotlight_enabled: false,
         non_git,
+        external_dir_links: Vec::new(),
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
@@ -1193,6 +1416,7 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         members,
         spotlight_enabled: false,
         non_git,
+        external_dir_links: Vec::new(),
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
@@ -1256,6 +1480,186 @@ fn project_update(p: Project) -> Result<(), String> {
     } else {
         Err("project not found".into())
     }
+}
+
+// ───────────────────────────── external directory links (Task 7) ─────────────────────────────
+//
+// `Project.external_dir_links` is a list of `{name, target_path}`
+// pointers to directories outside the worktree. New + imported
+// workspaces materialize each link as a symlink inside the worktree
+// so the file tree can surface the external dir as if it were a
+// sibling of the worktree contents. Skips with a warning if a real
+// file/dir already occupies the link path.
+
+/// Validate a user-supplied link name. Returns the trimmed name on
+/// success. Rejects empty, `/`, `..` anywhere in the name, and a
+/// leading `.` (which would create a hidden directory).
+fn validate_link_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("link name cannot be empty".into());
+    }
+    if trimmed.contains('/') {
+        return Err("invalid link name (no '/' allowed)".into());
+    }
+    if trimmed.contains("..") {
+        return Err("invalid link name (no '..' allowed)".into());
+    }
+    if trimmed.starts_with('.') {
+        return Err("invalid link name (cannot start with '.')".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Drop a symlink at `<worktree>/<link.name>` pointing at
+/// `link.target_path` for every entry in `proj.external_dir_links`.
+/// Returns a flat `Vec<String>` of outcome lines ("applied: …",
+/// "skipped (existing real path): …", "error: …") so the Repair
+/// command can surface a single batched report to the UI.
+fn materialize_external_dir_links(proj: &Project, wt_path: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for link in &proj.external_dir_links {
+        if link.name.is_empty() || link.target_path.is_empty() {
+            out.push(format!("skipped (empty entry): {}", link.name));
+            continue;
+        }
+        let target = wt_path.join(&link.name);
+        // `symlink_metadata` (vs. `metadata`) reports the symlink
+        // itself — we can detect "something exists here" without
+        // dereferencing into a missing target.
+        if target.symlink_metadata().is_ok() {
+            if let Ok(existing) = fs::read_link(&target) {
+                if existing == PathBuf::from(&link.target_path) {
+                    out.push(format!("exists (symlink OK): {}", link.name));
+                    continue;
+                }
+                eprintln!(
+                    "materialize_external_dir_links: {} is a symlink to {:?}, not {}; skipping",
+                    target.display(), existing, link.target_path
+                );
+                out.push(format!("skipped (existing symlink to different target): {}", link.name));
+                continue;
+            }
+            eprintln!(
+                "materialize_external_dir_links: {} exists and isn't our symlink; skipping {}",
+                target.display(), link.name
+            );
+            out.push(format!("skipped (existing real path): {}", link.name));
+            continue;
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&link.target_path, &target) {
+            eprintln!(
+                "materialize_external_dir_links: symlink {} -> {} failed: {e}",
+                link.name, link.target_path
+            );
+            out.push(format!("error: {} - {}", link.name, e));
+            continue;
+        }
+        out.push(format!("applied: {} -> {}", link.name, link.target_path));
+    }
+    out
+}
+
+/// Add an external directory link to a project. Validates the name
+/// (empty/`/`/`..`/leading-dot all rejected) and the target path
+/// (expands `~`, must be non-empty). Duplicate names return a
+/// specific error. The new link is persisted to `projects.json` and
+/// the updated `Project` is returned.
+#[tauri::command]
+fn external_dir_link_add(project_id: String, name: String, target_path: String) -> Result<Project, String> {
+    let name = validate_link_name(&name)?;
+    let target_trim = target_path.trim();
+    if target_trim.is_empty() {
+        return Err("link target path cannot be empty".into());
+    }
+    let target = if let Some(rest) = target_trim.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(rest).to_string_lossy().into_owned())
+            .unwrap_or_else(|| target_trim.to_string())
+    } else {
+        target_trim.to_string()
+    };
+    let mut list = load_projects();
+    let idx = list.iter().position(|p| p.id == project_id)
+        .ok_or("project not found")?;
+    if list[idx].external_dir_links.iter().any(|l| l.name == name) {
+        return Err(format!("link name '{}' already exists", name));
+    }
+    list[idx].external_dir_links.push(ExternalDirLink { name, target_path: target });
+    let result = list[idx].clone();
+    save_projects(&list).map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// Remove an external directory link from a project. Persists and
+/// returns the updated `Project`. Existing symlinks in workspaces
+/// are not removed (the next archive + recreate will clean them).
+#[tauri::command]
+fn external_dir_link_remove(project_id: String, name: String) -> Result<Project, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("link name cannot be empty".into());
+    }
+    let mut list = load_projects();
+    let idx = list.iter().position(|p| p.id == project_id)
+        .ok_or("project not found")?;
+    let before = list[idx].external_dir_links.len();
+    list[idx].external_dir_links.retain(|l| l.name != name);
+    if list[idx].external_dir_links.len() == before {
+        return Err(format!("link '{}' not found", name));
+    }
+    let result = list[idx].clone();
+    save_projects(&list).map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// Re-materialize the project's `external_dir_links` as symlinks in
+/// every active workspace of the project that owns `workspace_id`.
+/// Returns a flat list of human-readable result lines (one set per
+/// workspace, separated by header lines). Backs the "Repair
+/// symlinks for all workspaces" button.
+///
+/// Async + `spawn_blocking` per the long-running-IPC convention
+/// in CLAUDE.md: iterates all active workspaces of the project and
+/// may create a handful of symlinks per workspace.
+#[tauri::command]
+async fn workspace_repair_links(workspace_id: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let workspaces = load_workspaces();
+        let ws = workspaces.iter().find(|w| w.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        let project_id = ws.project_id.clone();
+        drop(workspaces);
+
+        let projects = load_projects();
+        let proj = projects.iter().find(|p| p.id == project_id)
+            .ok_or_else(|| "project not found".to_string())?;
+        let project_name = proj.name.clone();
+        let links_snapshot: Vec<ExternalDirLink> = proj.external_dir_links.clone();
+        drop(projects);
+
+        let siblings: Vec<Workspace> = load_workspaces().into_iter()
+            .filter(|w| w.project_id == project_id && !w.archived)
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        out.push(format!("Repair for project \"{}\" ({} active workspace{})",
+            project_name, siblings.len(), if siblings.len() == 1 { "" } else { "s" }));
+        if links_snapshot.is_empty() {
+            out.push("(no external directory links configured for this project)".into());
+        }
+        let proj_for_helper = Project {
+            id: project_id.clone(),
+            name: project_name.clone(),
+            external_dir_links: links_snapshot,
+            ..Project::default()
+        };
+        for sib in &siblings {
+            out.push(format!("--- workspace \"{}\" ({}) ---", sib.name, sib.id));
+            let p = PathBuf::from(&sib.path);
+            out.extend(materialize_external_dir_links(&proj_for_helper, &p));
+        }
+        Ok(out)
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Remove a project AND archive every workspace under it (kills running
@@ -1598,6 +2002,7 @@ fn workspace_import_worktree(
         custom_command: None,
     };
     save_workspace(&ws).map_err(|e| e.to_string())?;
+    let _ = materialize_external_dir_links(&proj, &wt);
     Ok(ws)
 }
 
@@ -1760,6 +2165,10 @@ fn workspace_create_sync(app: AppHandle, args: CreateWorkspaceArgs) -> Result<Wo
         copy_matching(&repo, &wt_path, pat);
     }
 
+    // Project-level external directory links → symlinks in the new
+    // worktree. Helper logs and skips any real-file collisions.
+    let _ = materialize_external_dir_links(&proj, &wt_path);
+
     // Allocate port (18100 + index).
     let port = 18100 + (load_workspaces().len() as u16);
 
@@ -1830,8 +2239,14 @@ fn workspace_create_sync(app: AppHandle, args: CreateWorkspaceArgs) -> Result<Wo
 
     // Run setup script in a background thread so the IPC handler returns
     // immediately and the UI doesn't freeze. Errors are surfaced via a
-    // notification rather than failing workspace creation.
-    let (setup_script, _, _) = effective_scripts(&proj);
+    // notification rather than failing workspace creation. The issue-
+    // import flow (Task 9) can pass a per-workspace override via
+    // `args.setup_script` to seed the issue body as a setup note; we
+    // fall back to the project-derived script otherwise.
+    let setup_script = match args.setup_script.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => effective_scripts(&proj).0,
+    };
     if !setup_script.trim().is_empty() {
         // Stream stdout+stderr to the frontend so the New Workspace dialog
         // can show live progress. Frontend listens on:
@@ -2993,6 +3408,187 @@ fn workspace_archive_sync(id: String, delete_branch: bool) -> Result<(), String>
     w.archived = true;
     save_workspace(w).map_err(|e| e.to_string())?;
     if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+}
+
+// ───────────────────────── restore archived workspace (Task 12) ─────────────────────────
+
+/// Cheap validation for an archived-workspace restore. Returns the
+/// resolved worktree path on success; surfaces clear errors for
+/// repo-root / non-git / missing-branch cases so the UI doesn't have
+/// to interpret internal `git` output. Extracted from the main
+/// `workspace_restore_sync` so the unit tests for the error paths
+/// don't need to touch the data dir or run a full restore.
+fn workspace_restore_validate(w: &Workspace, proj: &Project) -> Result<PathBuf, String> {
+    if w.is_repo_root {
+        return Err("repo-root workspaces can't be restored this way — the repo is still on disk; re-open it via the project".into());
+    }
+    if proj.non_git {
+        return Err("non-git projects don't support worktree restore".into());
+    }
+    if w.branch.is_empty() {
+        return Err("archived workspace has no saved branch — cannot restore".into());
+    }
+    let repo = PathBuf::from(&proj.root_path);
+    if git(&["rev-parse", "--verify", &w.branch], &repo).is_err() {
+        return Err(format!(
+            "branch '{}' no longer exists in the project's repo",
+            w.branch
+        ));
+    }
+    Ok(PathBuf::from(&w.path))
+}
+
+/// Re-materialize the on-disk worktree for an archived workspace:
+/// prune stale git worktree registrations, nuke any orphan dir at the
+/// saved path, then `git worktree add` the branch back in. Also
+/// re-copies `files_to_copy` and re-materializes `external_dir_links`,
+/// mirroring `workspace_create_sync` so the restored worktree is
+/// indistinguishable from a freshly-created one.
+///
+/// Errors before the worktree re-add leave the workspace archived —
+/// per the plan rule "must NOT remove archived history until restore
+/// succeeds". The `archived = false` flip is the very last step.
+fn workspace_restore_sync(id: String) -> Result<Workspace, String> {
+    // 1. Load + freshness check.
+    let list = load_workspaces();
+    let w = list.iter().find(|w| w.id == id)
+        .ok_or("workspace not found")?
+        .clone();
+    if !w.archived {
+        return Err("workspace is not archived".into());
+    }
+    let projects = load_projects();
+    let proj = projects.iter().find(|p| p.id == w.project_id)
+        .ok_or("project not found")?
+        .clone();
+
+    // 2. Cheap validation (clear errors for repo-root / non-git / missing branch).
+    let wt_path = workspace_restore_validate(&w, &proj)?;
+    let repo = PathBuf::from(&proj.root_path);
+
+    // 3. Clean stale worktree metadata. Refs to dirs the user removed
+    //    by hand or leftovers from a previous failed restore.
+    let _ = git(&["worktree", "prune"], &repo);
+
+    // 4. If the saved path is occupied, decide what to do.
+    if wt_path.exists() {
+        let listed = git(&["worktree", "list", "--porcelain"], &repo).unwrap_or_default();
+        let path_str = wt_path.to_string_lossy();
+        let registered = listed.lines().any(|l| {
+            l.strip_prefix("worktree ").map(|p| p == path_str).unwrap_or(false)
+        });
+        if registered {
+            return Err(format!(
+                "a worktree already lives at {} — remove it first",
+                wt_path.display()
+            ));
+        }
+        // Orphan dir from a prior failed restore — nuke it.
+        fs::remove_dir_all(&wt_path).map_err(|e|
+            format!("orphan directory at {} couldn't be removed: {}", wt_path.display(), e))?;
+    }
+
+    // 5. git-crypt: two-step worktree-add (--no-checkout → symlink key
+    //    dir → reset --hard HEAD) so the smudge filter finds the key
+    //    in the new per-worktree gitdir. Mirrors workspace_create_sync.
+    let common_gitdir = git(&["rev-parse", "--git-common-dir"], &repo)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .map(|s| {
+            let p = PathBuf::from(&s);
+            if p.is_absolute() { p } else { repo.join(p) }
+        });
+    let has_git_crypt = common_gitdir
+        .as_ref()
+        .map(|p| p.join("git-crypt").exists())
+        .unwrap_or(false);
+
+    let wt_arg = wt_path.to_str().ok_or("worktree path is not valid UTF-8")?;
+    let add_args: Vec<&str> = if has_git_crypt {
+        vec!["worktree", "add", "--no-checkout", wt_arg, &w.branch]
+    } else {
+        vec!["worktree", "add", wt_arg, &w.branch]
+    };
+    git(&add_args, &repo).map_err(|e| format!("worktree add failed: {e}"))?;
+
+    if has_git_crypt {
+        let wt_gitdir_raw = git(&["rev-parse", "--git-dir"], &wt_path)
+            .map_err(|e| format!("git-crypt setup: couldn't resolve worktree gitdir: {e}"))?;
+        let wt_gitdir = {
+            let p = PathBuf::from(wt_gitdir_raw.trim());
+            if p.is_absolute() { p } else { wt_path.join(p) }
+        };
+        let key_target = common_gitdir.as_ref().unwrap().join("git-crypt");
+        let key_link = wt_gitdir.join("git-crypt");
+        if !key_link.exists() {
+            std::os::unix::fs::symlink(&key_target, &key_link)
+                .map_err(|e| format!("git-crypt setup: symlink {} → {} failed: {e}",
+                    key_link.display(), key_target.display()))?;
+        }
+        git(&["reset", "--hard", "HEAD"], &wt_path)
+            .map_err(|e| format!("git-crypt setup: post-symlink checkout failed: {e}"))?;
+    }
+
+    // 6. Re-copy `files_to_copy` (parity with workspace_create_sync).
+    for pat in &effective_files_to_copy(&proj) {
+        copy_matching(&repo, &wt_path, pat);
+    }
+
+    // 7. Re-materialize the project's external dir links. Task 7
+    //    added this helper. The result Vec is discarded — restore
+    //    either succeeds or fails; partial link results aren't useful
+    //    to surface in a toast.
+    let _ = materialize_external_dir_links(&proj, &wt_path);
+
+    // 8. Multi-repo: re-add each Worktree member. RepoRoot members
+    //    are symlinks to live checkouts — nothing to rebuild on
+    //    disk. Best-effort per-member: a missing branch or stale
+    //    registration is logged but doesn't abort (we've already
+    //    re-added the host).
+    for m in &w.composition {
+        if m.mode != MemberMode::Worktree { continue; }
+        if m.branch.is_empty() || m.path.is_empty() { continue; }
+        let Some(member_proj) = projects.iter().find(|p| p.id == m.project_id) else { continue; };
+        if member_proj.non_git { continue; }
+        let mrepo = PathBuf::from(&member_proj.root_path);
+        let mwt = PathBuf::from(&m.path);
+        let _ = git(&["worktree", "prune"], &mrepo);
+        if mwt.exists() {
+            let listed = git(&["worktree", "list", "--porcelain"], &mrepo).unwrap_or_default();
+            let mpath = mwt.to_string_lossy();
+            let registered = listed.lines().any(|l| {
+                l.strip_prefix("worktree ").map(|p| p == mpath).unwrap_or(false)
+            });
+            if registered { continue; }
+            let _ = fs::remove_dir_all(&mwt);
+        }
+        if git(&["rev-parse", "--verify", &m.branch], &mrepo).is_ok() {
+            let _ = git(&["worktree", "add", mwt.to_str().unwrap_or("."), &m.branch], &mrepo);
+        }
+    }
+
+    // 9. Persist `archived = false` LAST. Plan rule: "Do NOT remove the
+    //    archived history until restore succeeds." Everything above
+    //    can fail without leaving the workspace un-archived; this
+    //    step only runs when all the disk work has landed cleanly.
+    let mut list = load_workspaces();
+    let w = list.iter_mut().find(|w| w.id == id)
+        .ok_or("workspace vanished after restore")?;
+    w.archived = false;
+    save_workspace(w).map_err(|e| e.to_string())?;
+    Ok(w.clone())
+}
+
+#[tauri::command]
+async fn workspace_restore(id: String) -> Result<Workspace, String> {
+    // `git worktree add` + `git rev-parse` + a symlink pass + an FS
+    // copy are all synchronous FS work that can take a beat on a
+    // chunky repo, so we keep this off the IPC handler thread per
+    // the long-running-IPC discipline in CLAUDE.md. Mirrors
+    // workspace_create's shape exactly.
+    tauri::async_runtime::spawn_blocking(move || workspace_restore_sync(id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -4677,6 +5273,13 @@ pub struct Settings {
     /// editing these later only affects NEW workspaces.
     pub sandbox_default_rw_paths: Vec<String>,
     pub sandbox_default_allowed_hosts: Vec<String>,
+    /// Cached snapshot of the local `gh` CLI status — whether the binary
+    /// is on PATH and whether `gh auth status` exits 0. The Rust side
+    /// re-checks on demand; this is a non-stale hint the UI shows (e.g.
+    /// for the "Open PR" affordance). Missing = the check hasn't been
+    /// run yet, NOT "not installed".
+    #[serde(default)]
+    pub github_status: Option<GithubStatus>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5236,6 +5839,1201 @@ pub struct CliInfo {
     pub version: String,
 }
 
+/// Snapshot of `gh` CLI presence + github.com auth. Drives the
+/// "GitHub connected / not connected" badges on the upcoming first-class
+/// git surface. Cheap enough to call from `loadAll` (one `which` plus at
+/// most one `gh auth status`).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GithubStatus {
+    /// True if the `gh` binary is somewhere on PATH.
+    pub available: bool,
+    /// True if `gh` is logged into github.com. Only meaningful when
+    /// `available` is true; on a missing `gh` we short-circuit and
+    /// leave this false (no `gh auth status` call to make).
+    pub authenticated: bool,
+    /// github.com username, when `authenticated`. None otherwise.
+    /// Pulled from `gh auth status` output — we never store tokens.
+    pub username: Option<String>,
+}
+
+/// Resolve the `gh` binary. macOS/Linux use `which`; Windows would use
+/// `where` but the project's primary targets are macOS/Linux today so
+/// this stays simple. Returns the resolved path, or empty on miss.
+fn gh_resolve_path() -> String {
+    // Bind the `Command` to a `let` so the temporary lives long enough
+    // for `probe.output()` to borrow from it (rustc E0716 catches the
+    // implicit-drop variant of this if/else form).
+    let mut probe: Command = if cfg!(target_os = "windows") {
+        let mut c = Command::new("where");
+        c.arg("gh");
+        c
+    } else {
+        let mut c = Command::new("which");
+        c.arg("gh");
+        c
+    };
+    probe.output().ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+/// Parse `gh auth status` output. The CLI prints something like:
+///
+///     github.com
+///       ✓ Logged in to github.com as octocat (/Users/x/.config/gh/hosts.yml)
+///
+/// Username extraction uses the "as <name>" pattern, which has been
+/// stable across gh versions. Case-insensitive on "Logged in" / "as" /
+/// "github.com" to tolerate minor stylistic drift in future versions.
+fn parse_gh_auth_output(stdout: &str) -> Option<String> {
+    let lower = stdout.to_lowercase();
+    if !lower.contains("github.com") { return None; }
+    for line in stdout.lines() {
+        let l = line.trim();
+        if l.is_empty() { continue; }
+        if !l.to_lowercase().contains("logged in") { continue; }
+        if !l.to_lowercase().contains("github.com") { continue; }
+        if let Some(idx) = l.to_lowercase().find(" as ") {
+            let after = &l[idx + 4..];
+            let name: String = after
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect::<String>()
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                .to_string();
+            if !name.is_empty() { return Some(name); }
+        }
+    }
+    None
+}
+
+/// Probe `gh auth status` (no network when already authed — `gh` uses
+/// the cached token). Returns (authenticated, username).
+fn gh_probe_auth() -> (bool, Option<String>) {
+    // Capture both stdout AND stderr — the "Logged in to github.com as
+    // X" line moves between streams across gh versions, and a regex
+    // pass is cheaper than pinning to a specific stream.
+    let out = Command::new("gh")
+        .args(["auth", "status"])
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(_) => return (false, None),
+    };
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push('\n');
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() {
+        // Some gh versions exit 1 even when auth succeeded but a
+        // secondary check (token scopes, protocol) failed. If we can
+        // still parse a username, trust it.
+        if let Some(u) = parse_gh_auth_output(&combined) {
+            return (true, Some(u));
+        }
+        return (false, None);
+    }
+    match parse_gh_auth_output(&combined) {
+        Some(u) => (true, Some(u)),
+        None => (false, None),
+    }
+}
+
+fn github_status_blocking() -> GithubStatus {
+    let path = gh_resolve_path();
+    if path.is_empty() {
+        return GithubStatus { available: false, authenticated: false, username: None };
+    }
+    let (authenticated, username) = gh_probe_auth();
+    GithubStatus { available: true, authenticated, username }
+}
+
+/// IPC entry: returns the current `gh` install + auth snapshot. Async +
+/// spawn_blocking per the long-running-IPC discipline — even though the
+/// individual subprocesses are fast, they CAN take 200-500ms on a cold
+/// PATH / uncached token and we don't want to be on the IPC thread
+/// when that happens. The frontend's `loadAll` already runs async, so
+/// this is non-blocking at startup.
+#[tauri::command]
+async fn github_status() -> GithubStatus {
+    tauri::async_runtime::spawn_blocking(github_status_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+// ───────────────────────────── gh PR + checks fetch ─────────────────────────────
+//
+// Task 8 of the termic-vs-conductor plan. The Checks tab in the right-panel
+// footer pulls PR metadata + commit check-runs for the workspace's branch via
+// `gh pr view` + `gh pr checks`. Both run in the project's `root_path` (the
+// live checkout — not the worktree — so `gh` can locate the git remote).
+//
+// Error contract: the IPC returns `Result<PullRequestWithChecks, String>` where
+// the Err string is prefixed with a stable code the UI matches on:
+//   - "gh_unavailable: ..."     — `gh` binary missing on PATH
+//   - "gh_unauthenticated: ..." — `gh` exits non-zero with an auth hint
+//   - "rate_limited: ..."       — `gh` reports API rate limit
+//   - any other Err             — generic failure, UI falls back to a toast
+// "No PR for this branch" is NOT an error — the success payload has
+// `pr: null, checks: []` and the UI renders the "No PR or checks found" state.
+
+/// Run `gh pr view <branch> --json …` in `cwd` and return the parsed PR
+/// metadata, or `Ok(None)` when the branch has no associated PR
+/// (non-zero exit with a "no pull requests found" message on stderr).
+fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequest>> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "view", branch,
+            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft,headRefOid",
+        ])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("gh pr view {} (cwd={})", branch, cwd.display()))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        // "no pull requests found for branch <X>" → branch has no PR.
+        // Treat as Ok(None) so the UI renders the empty state — not an
+        // error toast. The `gh` exit code is 4 in this case (cmd 4
+        // = resource not found), but we match the message instead of
+        // the code so we're tolerant of future gh versions.
+        if stderr.to_lowercase().contains("no pull requests found")
+            || stderr.to_lowercase().contains("no pr") && stderr.to_lowercase().contains("not found")
+        {
+            return Ok(None);
+        }
+        return Err(classify_gh_error(&out.status, &stderr));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // `gh pr view --json` emits camelCase keys (headRefName, baseRefName,
+    // isDraft, ...). Map them to the snake_case `GitHubPullRequest` wire
+    // shape via a private DTO so the rest of the file stays snake_case
+    // on both sides — the rule from CLAUDE.md.
+    #[derive(Deserialize)]
+    struct GhPrDto {
+        number: u64,
+        title: String,
+        body: Option<String>,
+        state: String,
+        head_ref_name: String,
+        base_ref_name: String,
+        url: String,
+        is_draft: bool,
+        /// `gh pr view`'s `headRefOid` — the SHA of the PR's head
+        /// commit. Optional because older `gh` versions don't expose
+        /// this field; absent → the popover disables "Post to
+        /// GitHub" rather than guess at a SHA. `headRefName` is the
+        /// branch name, NOT a commit, so we can't fall back to it.
+        #[serde(default)]
+        head_ref_oid: Option<String>,
+    }
+    let dto: GhPrDto = serde_json::from_str(&stdout)
+        .with_context(|| format!("parse gh pr view: {}", stdout))?;
+    Ok(Some(GitHubPullRequest {
+        number: dto.number,
+        title: dto.title,
+        // GitHub returns an empty body as `null` in the JSON; serde handles
+        // that natively. We do NOT trim title / refs here — preserve as-is
+        // so the UI can word-wrap and the link's `?diff=split` URL is
+        // untouched.
+        body: dto.body,
+        state: dto.state,
+        head_ref: dto.head_ref_name,
+        base_ref: dto.base_ref_name,
+        html_url: dto.url,
+        draft: dto.is_draft,
+        head_sha: dto.head_ref_oid,
+        // Derived: we don't have the checks list at this point (we
+        // fetch it separately); leaving as None signals "unknown" and
+        // the UI re-aggregates from the checks payload when needed.
+        // A stale "true" would be worse than "unknown".
+        checks_passing: None,
+    }))
+}
+
+/// Run `gh pr checks <branch> --json …` in `cwd` and return the parsed
+/// `Vec<GitHubCheckRun>`. Empty vec when the branch has no checks OR
+/// when the branch has no PR (the latter is the typical case — the
+/// caller passes the result straight through). We DO NOT fail loudly
+/// on `gh pr checks` exit non-zero when `pr view` succeeded: an older
+/// gh that lacks `--json` support for `pr checks` falls through to the
+/// REST API path below, and an empty checks list is otherwise a
+/// legitimate state.
+fn gh_pr_checks_list_blocking(cwd: &Path, branch: &str) -> Result<Vec<GitHubCheckRun>> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "checks", branch,
+            "--json", "name,state,conclusion,detailsUrl,startedAt,completedAt",
+        ])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("gh pr checks {} (cwd={})", branch, cwd.display()))?;
+    // Empty stdout + non-zero exit on a valid PR usually means "no
+    // checks" or "gh version doesn't support --json here". Either way:
+    // empty list, no escalation. Auth / rate-limit errors are still
+    // classified by `classify_gh_error` and bubble up.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // gh pr checks JSON: top-level array of objects, but the field
+    // names are camelCase (detailsUrl, startedAt, completedAt). We
+    // map them to the snake_case struct fields via an intermediate
+    // DTO so the `GitHubCheckRun` wire shape stays consistent with
+    // the rest of the file (snake_case on BOTH sides).
+    #[derive(Deserialize)]
+    struct GhCheckDto {
+        name: String,
+        state: String,
+        conclusion: Option<String>,
+        details_url: Option<String>,
+        started_at: String,
+        completed_at: Option<String>,
+    }
+    let dtos: Vec<GhCheckDto> = serde_json::from_str(&stdout)
+        .with_context(|| format!("parse gh pr checks: {}", stdout))?;
+    Ok(dtos.into_iter().enumerate().map(|(i, d)| GitHubCheckRun {
+        // `gh pr checks --json` doesn't expose the GitHub check-run id;
+        // we only use the URL on the frontend, so the synthetic
+        // position-based id is fine for now. If the UI ever needs the
+        // real id, swap to `gh api repos/.../check-runs` (the fallback
+        // path mentioned in the plan task spec).
+        id: i as u64,
+        name: d.name,
+        status: d.state,
+        conclusion: d.conclusion,
+        started_at: d.started_at,
+        completed_at: d.completed_at,
+        html_url: d.details_url.unwrap_or_default(),
+    }).collect())
+}
+
+/// Classify a non-zero `gh` exit into a stable error code prefix the UI
+/// can match on. The Err string is "<code>: <stderr>" so the UI does
+/// `err.startsWith("gh_unavailable:")` etc. to pick the right empty
+/// state.
+fn classify_gh_error(status: &std::process::ExitStatus, stderr: &str) -> anyhow::Error {
+    let lower = stderr.to_lowercase();
+    if !status.success() && stderr.is_empty() {
+        // `which gh` returned nothing → "No such file or directory"
+        // comes back as the OS error on stderr from Command::new.
+        // `which` itself doesn't run; Rust's Command::new surfaces
+        // io::Error::NotFound as a non-zero status with an empty
+        // stdout but the error message from spawn() is captured by
+        // `with_context` upstream — so this branch is mostly for
+        // "gh exited with empty stderr and no output".
+        return anyhow!("gh_unavailable: gh CLI exited with no output (status {})", status);
+    }
+    if lower.contains("not logged in")
+        || lower.contains("auth login")
+        || lower.contains("not authenticated")
+        || lower.contains("no oauth token")
+    {
+        return anyhow!("gh_unauthenticated: {}", stderr.trim());
+    }
+    if lower.contains("rate limit") || lower.contains("api rate limit exceeded") {
+        return anyhow!("rate_limited: {}", stderr.trim());
+    }
+    anyhow!("gh_error: {}", stderr.trim())
+}
+
+/// Blocking implementation: load the project by id, resolve its
+/// `root_path`, and run `gh pr view` + `gh pr checks` there.
+fn github_pr_checks_fetch_blocking(
+    project_id: String,
+    branch: String,
+) -> Result<PullRequestWithChecks> {
+    // Look up the project via the same loader the rest of the file
+    // uses. `load_projects()` never returns Err — it falls back to an
+    // empty Vec when projects.json is missing or unparseable.
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| anyhow!("project not found: {}", project_id))?;
+    let cwd = PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(anyhow!("project root path missing: {}", project.root_path));
+    }
+    let pr = gh_pr_view_blocking(&cwd, &branch)?;
+    // Even when there's no PR, we still try the checks call — a
+    // branch with no PR but commit checks (rare, but possible if the
+    // user queried a branch GitHub hasn't linked to a PR) returns
+    // an empty list from the helper, which is the right behavior.
+    let checks = gh_pr_checks_list_blocking(&cwd, &branch)?;
+    Ok(PullRequestWithChecks { pr, checks })
+}
+
+/// IPC entry: pull the PR + checks bundle for the workspace's branch.
+/// Async + `spawn_blocking` per the long-running-IPC discipline — two
+/// `gh` subprocesses (each up to a few hundred ms on a cold PATH),
+/// we don't want either to block the WKWebView event loop.
+#[tauri::command]
+async fn github_pr_checks_fetch(
+    project_id: String,
+    branch: String,
+) -> Result<PullRequestWithChecks, String> {
+    tauri::async_runtime::spawn_blocking(move || github_pr_checks_fetch_blocking(project_id, branch))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+// ───────────────────────────── gh issue fetch (Task 9) ─────────────────────────────
+//
+// Task 9 of the termic-vs-conductor plan. The IssueImportDialog pastes a
+// GitHub issue URL, we shell out to `gh api repos/<owner>/<repo>/issues/<n>`
+// to fetch the title + body, and return an `IssueSeed` the dialog uses to
+// pre-fill the new-workspace form.
+//
+// Supported schemes (strict; everything else is rejected):
+//   https://github.com/<owner>/<repo>/issues/<n>
+//   - host is case-insensitive ("GitHub.com" works too)
+//   - no trailing path, no query string, no fragment
+//   - <n> is a positive integer
+//
+// Linear URLs (linear.app/...) are explicitly rejected with
+// "Linear authentication not configured" — Task 15 will add the real
+// Linear flow; this task is GitHub-only by design.
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable`, `gh_unauthenticated`,
+// `rate_limited`, fallback `gh_error`), routed through
+// `classify_gh_error` so the UI matches on the same prefixes it
+// already does for the Checks tab.
+
+/// Parse a GitHub issue URL into (owner, repo, number). Rejects
+/// everything that isn't `https://github.com/<owner>/<repo>/issues/<n>`
+/// with a clean error message. Pure function — no I/O — so it's
+/// unit-testable without spawning `gh`.
+///
+/// Issue number: positive integer (1, 2, 3, …). Number 0 doesn't
+/// exist on GitHub; we accept it and let `gh api` return a 404
+/// (classified as `gh_error` upstream).
+fn parse_github_issue_url(url: &str) -> Result<(String, String, u64), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Unsupported issue URL: empty string".into());
+    }
+    // Linear short-circuit BEFORE the generic GitHub check — a
+    // pasted linear.app URL must surface the "not configured"
+    // error, not the "unsupported scheme" one.
+    if trimmed.to_lowercase().contains("linear.app/") {
+        return Err("Linear authentication not configured".into());
+    }
+    // Hand-parse instead of using `url::Url` so we can emit
+    // precise per-failure error messages and reject plain `http://`.
+    let after_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .ok_or_else(|| format!("Unsupported issue URL: {} (expected https://github.com/...)", trimmed))?;
+    if trimmed.starts_with("http://") {
+        return Err(format!("Unsupported issue URL: {} (expected https)", trimmed));
+    }
+    let (host, rest) = after_scheme
+        .split_once('/')
+        .ok_or_else(|| format!("Unsupported issue URL: {} (no path)", trimmed))?;
+    if host.to_lowercase() != "github.com" {
+        return Err(format!("Unsupported issue URL: {} (host must be github.com)", trimmed));
+    }
+    // Strict segment count — rejects trailing slashes, query
+    // strings, fragments, and `/pulls/<n>` shape.
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.len() != 4 {
+        return Err(format!("Unsupported issue URL: {} (expected /<owner>/<repo>/issues/<n>)", trimmed));
+    }
+    let owner = segments[0];
+    let repo = segments[1];
+    let issues_word = segments[2];
+    let number_str = segments[3];
+    if owner.is_empty() || repo.is_empty() {
+        return Err(format!("Unsupported issue URL: {} (missing owner or repo)", trimmed));
+    }
+    if !owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || !repo.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(format!("Unsupported issue URL: {} (invalid owner or repo characters)", trimmed));
+    }
+    if issues_word != "issues" {
+        return Err(format!("Unsupported issue URL: {} (not an /issues/ URL)", trimmed));
+    }
+    let number: u64 = number_str
+        .parse()
+        .map_err(|_| format!("Unsupported issue URL: {} (issue number must be a positive integer)", trimmed))?;
+    if number == 0 {
+        return Err(format!("Unsupported issue URL: {} (issue number must be > 0)", trimmed));
+    }
+    Ok((owner.to_string(), repo.to_string(), number))
+}
+
+/// Parse an issue URL into a `ParsedIssueUrl`. Accepts BOTH GitHub
+/// and Linear schemes (Task 15). The GitHub branch delegates to
+/// `parse_github_issue_url` for the per-segment validation; the
+/// Linear branch is hand-rolled for the same reason as Task 9's
+/// GitHub parser — `url::Url` is permissive and emits uniform
+/// "relative URL without a base" errors that are hard to make
+/// user-friendly.
+///
+/// Linear URL shape:
+///   https://linear.app/<workspace>/issue/<id>
+///   - workspace is the team's slug (any non-empty, no `/`)
+///   - id is alphanumeric + `-` (covers both the human `ENG-1234`
+///     form and the UUID form, since UUIDs only add `-` + hex)
+///   - host is case-insensitive ("Linear.app" works too)
+///   - no trailing path, no query string, no fragment
+///
+/// Rejects anything else with `"Unsupported issue URL: …"`. The
+/// dialog uses a regex mirror of these rules client-side to pick
+/// the right IPC; this function is the authoritative server-side
+/// gate and a future unified dispatcher entry point.
+///
+/// `#[allow(dead_code)]`: the only production caller is a future
+/// unified `IssueFetch` IPC that takes a URL and dispatches. Today
+/// the dialog pre-detects client-side and routes to either
+/// `github_issue_fetch` or `linear_issue_fetch` (the latter takes a
+/// bare id, not a URL), so the parser is exercised by the
+/// `parse_issue_url_handles_both_schemes` unit test only. Rust's
+/// `dead_code` analysis doesn't count `#[cfg(test)]` references,
+/// hence the allow.
+#[allow(dead_code)]
+fn parse_issue_url(url: &str) -> Result<ParsedIssueUrl, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Unsupported issue URL: empty string".into());
+    }
+    // Try GitHub first — covers the common case (most users paste
+    // GitHub URLs today) and matches what the dialog regex mirror
+    // checks first. The linear.app short-circuit lives inside
+    // `parse_github_issue_url` for the same reason as before: a
+    // pasted linear.app URL routed to `github_issue_fetch` would
+    // surface a misleading "host must be github.com" error.
+    if let Ok((owner, repo, number)) = parse_github_issue_url(trimmed) {
+        return Ok(ParsedIssueUrl {
+            kind: IssueUrlKind::Github,
+            github: Some((owner, repo, number)),
+            linear: None,
+        });
+    }
+    // Linear branch. Hand-parse for the same reasons as the GitHub
+    // branch (per-segment error messages, strict segment count).
+    let after_scheme = trimmed
+        .strip_prefix("https://")
+        .ok_or_else(|| format!("Unsupported issue URL: {} (expected https://...)", trimmed))?;
+    let (host, rest) = after_scheme
+        .split_once('/')
+        .ok_or_else(|| format!("Unsupported issue URL: {} (no path)", trimmed))?;
+    if host.to_lowercase() != "linear.app" {
+        return Err(format!("Unsupported issue URL: {} (host must be github.com or linear.app)", trimmed));
+    }
+    // Strict segment count — `/<workspace>/issue/<id>` is exactly 3
+    // segments. Rejects trailing slashes, query strings, fragments,
+    // and `/issue/ENG-1/extra` shape at once.
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.len() != 3 {
+        return Err(format!("Unsupported issue URL: {} (expected /<workspace>/issue/<id>)", trimmed));
+    }
+    let workspace = segments[0];
+    let issue_word = segments[1];
+    let id = segments[2];
+    if workspace.is_empty() {
+        return Err(format!("Unsupported issue URL: {} (missing workspace)", trimmed));
+    }
+    // Workspace is a slug — lowercase letters, digits, hyphens, and
+    // underscores only. (Linear slugs are typically lowercase but we
+    // accept the full charset for safety; the issue id check below
+    // is the authoritative shape check.)
+    if !workspace.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return Err(format!("Unsupported issue URL: {} (invalid workspace characters)", trimmed));
+    }
+    if issue_word != "issue" {
+        return Err(format!("Unsupported issue URL: {} (not an /issue/ URL)", trimmed));
+    }
+    if id.is_empty() {
+        return Err(format!("Unsupported issue URL: {} (missing issue id)", trimmed));
+    }
+    // Id charset: alphanumeric + `-`. Covers both `ENG-1234` (the
+    // user-facing team-key form) and UUIDs (which are all hex +
+    // hyphens). The length floor (3) catches the empty-after-trim
+    // case that the segment-count check might miss if the id is a
+    // bare single hyphen or two-character gibberish.
+    if id.len() < 3 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("Unsupported issue URL: {} (invalid issue id)", trimmed));
+    }
+    Ok(ParsedIssueUrl {
+        kind: IssueUrlKind::Linear,
+        github: None,
+        linear: Some(id.to_string()),
+    })
+}
+
+/// Fetch a GitHub issue's title + body via `gh api`. The `--jq`
+/// filter narrows the response to just the fields we need so we
+/// don't ship the whole 30-field issue object over IPC. Reuses
+/// `classify_gh_error` for the standard error codes
+/// (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` / `gh_error`).
+fn github_issue_fetch_blocking(url: String) -> Result<IssueSeed, String> {
+    let (owner, repo, number) = parse_github_issue_url(&url)?;
+    // The `--jq` filter must produce a JSON OBJECT (not an array)
+    // so `serde_json::from_str` deserializes it into a struct.
+    let endpoint = format!("repos/{}/{}/issues/{}", owner, repo, number);
+    let out = Command::new("gh")
+        .args([
+            "api", &endpoint,
+            "--jq", "{title: .title, body: .body, number: .number, html_url: .html_url}",
+        ])
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh api ({}): {}", endpoint, e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    #[derive(Deserialize)]
+    struct GhIssueDto {
+        title: String,
+        body: Option<String>,
+    }
+    let dto: GhIssueDto = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("gh_error: parse gh api response: {} (raw: {})", e, stdout))?;
+    Ok(IssueSeed {
+        source: IssueSource::Github,
+        // Mirror the URL the user pasted, not the API's `html_url`
+        // — same on github.com today, but the user's canonical form
+        // is what they meant to paste.
+        url: url.trim().to_string(),
+        title: dto.title,
+        // GitHub's `--jq` projects an empty body to JSON null, but
+        // the raw API also returns "" for empty. Normalize to None.
+        body: dto.body.filter(|s| !s.is_empty()),
+    })
+}
+
+/// IPC entry: fetch an issue's title + body for the issue-import
+/// dialog. Async + `spawn_blocking` per the long-running-IPC
+/// discipline (a cold `gh api` against an uncached repo can take a
+/// few hundred ms). Errors carry the same `"<code>: <message>"`
+/// prefix the rest of the `gh` surface uses — same pattern as
+/// `github_pr_checks_fetch`.
+#[tauri::command]
+async fn github_issue_fetch(url: String) -> Result<IssueSeed, String> {
+    tauri::async_runtime::spawn_blocking(move || github_issue_fetch_blocking(url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────── Linear issue fetch (Task 15) ─────────────────────────────
+//
+// Task 15 of the termic-vs-conductor plan. The dialog pre-detects
+// Linear URLs client-side and routes them to `linear_issue_fetch`
+// instead of `github_issue_fetch`. The MVP behavior is to ALWAYS
+// reject with `"Linear authentication not configured"` — Linear's
+// public-by-default issue pages require an API token for the
+// `linear.app` GraphQL endpoint, and the plan spec is explicit:
+// "Do not add Linear OAuth or token storage." A future PR can
+// swap the body of `linear_issue_fetch_blocking` for a real
+// GraphQL call (with a per-workspace, per-session token prompt
+// or a system keychain lookup) without changing the IPC shape or
+// the dialog — the dialog already calls `linearIssueFetch` and
+// surfaces the Err string verbatim.
+//
+// The id validation is intentionally permissive (non-empty after
+// trim) because the dialog has already extracted the id from a
+// `https://linear.app/...` URL via the regex mirror of
+// `parse_issue_url`. A stricter check here would just duplicate
+// the parser's work. If a future caller invokes the IPC with a
+// raw id (no URL), the non-empty check is the floor.
+
+/// Sync helper for `linear_issue_fetch`. MVP: always rejects with
+/// `"Linear authentication not configured"`. The id is trimmed and
+/// non-empty-validated to match what the dialog would pass; future
+/// implementations can extend the validation cheaply.
+fn linear_issue_fetch_blocking(issue_id: String) -> Result<IssueSeed, String> {
+    let trimmed = issue_id.trim();
+    if trimmed.is_empty() {
+        return Err("Linear issue id cannot be empty".into());
+    }
+    Err("Linear authentication not configured".to_string())
+}
+
+/// IPC entry: fetch a Linear issue's title + body. MVP behavior:
+/// always rejects with `"Linear authentication not configured"`.
+/// The plan spec is explicit about this: "If Linear cannot be read
+/// without auth, surface clear unsupported/auth-required error" and
+/// "Do not add Linear OAuth or token storage." Async +
+/// `spawn_blocking` per the long-running-IPC discipline so the
+/// future GraphQL implementation (or a keychain lookup) has the
+/// same shape as the rest of the issue-fetch surface.
+#[tauri::command]
+async fn linear_issue_fetch(issue_id: String) -> Result<IssueSeed, String> {
+    tauri::async_runtime::spawn_blocking(move || linear_issue_fetch_blocking(issue_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────── gh PR create (Task 10) ─────────────────────────────
+//
+// Task 10 of the termic-vs-conductor plan. The PrCreateDialog collects
+// title / body / base / head / draft, the Rust side shells out to
+// `gh pr create` in the project's `root_path`, parses the URL the
+// subprocess prints to stdout, and then runs a follow-up `gh pr view`
+// against the same URL to round-trip the freshly-created PR into our
+// `GitHubPullRequest` wire struct. The two-call shape mirrors what a
+// user typing in a terminal would do — `gh pr create` is fire-and-
+// forget, the URL is the artifact — and keeps the dialog's success
+// path (return the full PR object for the Checks tab to display)
+// separate from the create call's quirks (stdout is just a URL).
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable` / `gh_unauthenticated` /
+// `rate_limited` / fallback `gh_error`), routed through
+// `classify_gh_error` so the UI matches on the same prefixes it
+// already does for the Checks tab.
+
+/// Extract the PR URL from `gh pr create` stdout. The CLI prints
+/// exactly the URL (no JSON, no key= prefix), terminated by `\n`.
+/// Older `gh` versions sometimes pad with a `\r` on Windows; the
+/// `trim()` covers that. Reject anything that doesn't look like a
+/// GitHub PR URL — better to error early than feed a junk string to
+/// `gh pr view` and get a confusing "not a pull request" back.
+///
+/// Pure function — no I/O — so it's unit-testable without spawning
+/// `gh`. Returns the trimmed URL on success, an error string the
+/// caller can prefix into the IPC `Err` on failure.
+fn extract_pr_url_from_gh_output(stdout: &str) -> Result<String, String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Err("gh pr create returned no URL (empty stdout)".into());
+    }
+    // Multi-line stdout is unusual but possible (gh could in theory
+    // add a stderr-redirected warning line, or the user could be on
+    // a version that prints a banner). The URL is always the LAST
+    // whitespace-separated token on the last non-empty line.
+    let candidate = trimmed
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .unwrap_or("")
+        .trim();
+    // Cheap shape check — reject anything that doesn't look like a
+    // GitHub PR URL. We don't full-parse (no owner/repo/number
+    // extraction) because the next call is `gh pr view <url>` which
+    // has its own strict URL parsing.
+    let lower = candidate.to_lowercase();
+    if !(lower.starts_with("https://github.com/") || lower.starts_with("http://github.com/"))
+        || !lower.contains("/pull/")
+    {
+        return Err(format!(
+            "gh pr create returned no URL (stdout did not contain a GitHub PR URL): {}",
+            trimmed
+        ));
+    }
+    Ok(candidate.to_string())
+}
+
+/// Blocking implementation: load the project by id, resolve its
+/// `root_path`, and run `gh pr create` then `gh pr view` in series.
+/// The view step round-trips the freshly-created PR into our wire
+/// struct so the dialog's success path matches the Checks tab's
+/// shape (no need to handle "we just got a URL" as a separate state).
+fn github_pr_create_blocking(
+    project_id: String,
+    title: String,
+    body: String,
+    base: String,
+    head: String,
+    draft: bool,
+) -> Result<GitHubPullRequest, String> {
+    // Trim title before validation — paste-from-clipboard often
+    // carries a trailing newline, and `gh pr create` would create
+    // the PR with a literal `\n` in the title if we passed it
+    // through unchecked. The frontend also trims (Task 10 spec:
+    // "Empty title blocked" must fire BEFORE the IPC), so this is
+    // belt-and-suspenders.
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("Title is required".into());
+    }
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+    // `--base` and `--head` must be non-empty. `gh` itself will
+    // reject them too, but the error it emits is opaque; checking
+    // here lets us surface a clear user-facing message.
+    let base = base.trim();
+    let head = head.trim();
+    if base.is_empty() {
+        return Err("Base branch is required".into());
+    }
+    if head.is_empty() {
+        return Err("Head branch is required".into());
+    }
+    // Build the argv. `--draft` is only added when draft=true so a
+    // non-draft PR doesn't get a flag the CLI might one day treat as
+    // inverted. Body is always passed (possibly empty) — `gh`
+    // tolerates an empty body, which the dialog explicitly allows
+    // ("Empty body allowed" per Task 10 spec).
+    let mut args: Vec<&str> = vec![
+        "pr", "create",
+        "--base", base,
+        "--head", head,
+        "--title", &title,
+        "--body", &body,
+    ];
+    if draft { args.push("--draft"); }
+    let out = Command::new("gh")
+        .args(&args)
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh pr create: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    // Pull the PR URL from stdout, then run a follow-up `gh pr view`
+    // against it so the dialog's success payload matches the
+    // `GitHubPullRequest` shape the Checks tab already renders.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let url = extract_pr_url_from_gh_output(&stdout)?;
+    gh_pr_view_by_url_blocking(&cwd, &url)
+}
+
+/// `gh pr view <url-or-number> --json …` — like `gh_pr_view_blocking`
+/// (Task 8) but takes a full URL instead of a branch name. Same DTO
+/// → wire-struct translation, same error contract. The URL form is
+/// what `gh pr create` returns on stdout, so post-create this is
+/// the natural follow-up call. We don't share code with the branch
+/// variant because the JSON is identical but the argv shape differs
+/// and the "no pull requests found" detection doesn't apply (we
+/// just got the URL from the create call — it has to exist).
+fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHubPullRequest, String> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "view", url,
+            "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft,headRefOid",
+        ])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh pr view: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    #[derive(Deserialize)]
+    struct GhPrDto {
+        number: u64,
+        title: String,
+        body: Option<String>,
+        state: String,
+        head_ref_name: String,
+        base_ref_name: String,
+        url: String,
+        is_draft: bool,
+        /// See the same field in `gh_pr_view_blocking` for the
+        /// optionality contract — newer `gh` versions expose
+        /// `headRefOid`, older ones don't.
+        #[serde(default)]
+        head_ref_oid: Option<String>,
+    }
+    let dto: GhPrDto = serde_json::from_str(&stdout)
+        .map_err(|e| format!("gh_error: parse gh pr view: {} (raw: {})", e, stdout))?;
+    Ok(GitHubPullRequest {
+        number: dto.number,
+        title: dto.title,
+        body: dto.body,
+        state: dto.state,
+        head_ref: dto.head_ref_name,
+        base_ref: dto.base_ref_name,
+        html_url: dto.url,
+        draft: dto.is_draft,
+        head_sha: dto.head_ref_oid,
+        // The post-create view has no associated check-runs yet
+        // (they don't exist until the workflows run) — leaving
+        // `checks_passing: None` is the "unknown" signal the
+        // Checks tab renders as a neutral state.
+        checks_passing: None,
+    })
+}
+
+/// IPC entry: create a PR (draft or regular) on GitHub via `gh`.
+/// Async + `spawn_blocking` per the long-running-IPC discipline —
+/// two `gh` subprocesses (the create + the follow-up view) each
+/// take a few hundred ms on a cold PATH. Errors carry the same
+/// `"<code>: <message>"` prefix the rest of the `gh` surface uses
+/// — the dialog does `err.split(":", 1)[0]` to pick the right
+/// inline error message. Success returns a `GitHubPullRequest`
+/// matching the shape the Checks tab already renders, so the
+/// dialog can show the URL + title + draft chip without a second
+/// fetch.
+#[tauri::command]
+async fn github_pr_create(
+    project_id: String,
+    title: String,
+    body: String,
+    base: String,
+    head: String,
+    draft: bool,
+) -> Result<GitHubPullRequest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_pr_create_blocking(project_id, title, body, base, head, draft)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────── gh PR merge (Task 13) ─────────────────────────────
+//
+// Task 13 of the termic-vs-conductor plan. The Checks tab (Task 8) renders
+// the PR + check-runs; this task adds the gated Merge button that shells
+// out to `gh pr merge`. The Rust side is intentionally minimal:
+//
+//   1. resolve the project's root_path (same loader as Task 8/10),
+//   2. validate the merge method against the fixed set
+//      `{ "merge", "squash", "rebase" }`,
+//   3. shell out to `gh pr merge <n> --<method> --delete-branch`.
+//
+// The `delete-branch` flag is on by default — the user's whole point of
+// merging is to land the work, and a merged branch is dead weight in the
+// remote. If the user wants to keep the remote branch (e.g. to push more
+// commits), they can re-create it from the merge commit SHA in their
+// terminal. (A future task could expose a "Keep remote branch" toggle in
+// the dialog — not in scope here.)
+//
+// We do NOT re-fetch the PR after merging. The Checks tab's effect already
+// refetches on `data.loading` flip; the dialog flips it after the merge
+// succeeds so the user sees the freshly-merged state.
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable` / `gh_unauthenticated` /
+// `rate_limited` / fallback `gh_error`), routed through
+// `classify_gh_error`. The dialog does `err.split(":", 1)[0]` to pick
+// the right toast copy. Spawn failures (gh missing) → `gh_unavailable`
+// prefix, same as the rest of the surface.
+
+/// Validate a `gh pr merge --<method>` value against the fixed set
+/// `gh` itself accepts. Pure function — no I/O — so it's unit-testable
+/// without spawning `gh`. Returns the trimmed method on success, an
+/// error string the caller prefixes into the IPC `Err` on failure.
+///
+/// We refuse anything outside `{merge, squash, rebase}` because (a) those
+/// are the three values `gh` itself documents for `--<method>`, and
+/// (b) letting arbitrary strings through would let a frontend bug
+/// shell out to `gh pr merge --rm -rf /` (no — `gh` rejects unknown
+/// methods too, but defense-in-depth at the IPC boundary is cheap and
+/// the user gets a clearer error here than "unknown flag" from gh).
+fn validate_pr_merge_method(method: &str) -> Result<&str, String> {
+    let trimmed = method.trim();
+    match trimmed {
+        "merge" | "squash" | "rebase" => Ok(trimmed),
+        _ => Err(format!(
+            "Invalid merge method: {} (expected one of: merge, squash, rebase)",
+            method
+        )),
+    }
+}
+
+/// Blocking implementation: load the project by id, resolve its
+/// `root_path`, validate the method, and shell out to `gh pr merge`.
+/// Returns the trimmed stdout (which `gh` populates with a
+/// "Merged pull request #N" or "Squash merging…" line on success,
+/// and leaves empty on `--quiet`-style success). The frontend
+/// doesn't currently render the stdout, but returning it leaves
+/// the door open for a future "Merge details" panel without
+/// re-shelling.
+fn github_pr_merge_blocking(
+    project_id: String,
+    pr_number: u64,
+    method: String,
+) -> Result<String, String> {
+    let method = validate_pr_merge_method(&method)?;
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+    // `pr_number: 0` would let `gh pr merge 0` fail with a confusing
+    // "no pull request matches the search" message. Reject 0
+    // explicitly — the dialog's gate (`pr.draft === false` etc.)
+    // already filters this UI-side, but the IPC is a public boundary.
+    if pr_number == 0 {
+        return Err("PR number must be greater than 0".into());
+    }
+    // Build argv. `pr_number` is interpolated as a positional arg; it
+    // can only be a u64, so no shell-injection surface. `--delete-branch`
+    // matches `gh`'s default of "delete the head ref after a successful
+    // merge" — see module-level comment for the rationale.
+    let out = Command::new("gh")
+        .args([
+            "pr", "merge", &pr_number.to_string(),
+            &format!("--{}", method),
+            "--delete-branch",
+        ])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh pr merge: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// IPC entry: merge a PR via `gh pr merge`. Async + `spawn_blocking`
+/// per the long-running-IPC discipline — the merge itself can take
+/// a few seconds (GitHub has to fast-forward / squash / rebase),
+/// and the user might trigger it on a slow network. Errors carry
+/// the same `"<code>: <message>"` prefix the rest of the `gh`
+/// surface uses; the dialog does `err.split(":", 1)[0]` to pick the
+/// right toast copy. Success returns the trimmed stdout (usually
+/// "Merged pull request #N").
+#[tauri::command]
+async fn github_pr_merge(
+    project_id: String,
+    pr_number: u64,
+    method: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_pr_merge_blocking(project_id, pr_number, method)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────── gh PR inline review comment (Task 14) ─────────────────────────────
+//
+// Task 14 of the termic-vs-conductor plan. Task 11 added local diff
+// comments (`DiffInlineComment` in the app store); this task round-trips
+// them to GitHub via `gh api repos/<owner>/<repo>/pulls/<n>/comments`.
+// On success the comment is stamped with the new `remote_id` (and a
+// `posted_at` timestamp) so the popover can hide the "Post to GitHub"
+// button on retry — that's the duplicate-post guard.
+//
+// Two-step `gh` flow:
+//   1. `gh repo view --json owner,nameWithOwner` — discover the
+//      `<owner>/<repo>` for the cwd's git remote. The full URL form
+//      `gh api /repos/<owner>/<repo>/pulls/<n>/comments` needs the
+//      owner/repo up front; `gh api` doesn't substitute from the cwd
+//      remote for path-form args the way it does for `gh pr view <n>`.
+//      One extra `gh` call, but it uses `gh`'s own remote discovery
+//      (so HTTPS remotes, SSH remotes, and the `hub` config all work).
+//   2. `gh api repos/<owner>/<repo>/pulls/<n>/comments -f body=… -f
+//      commit_id=… -f path=… -F line=… -f side=…` — POST the comment.
+//      `-F` (raw field) is used for `line` so it ships as a JSON
+//      integer, not the string `-f` would force. The other fields are
+//      strings, so `-f` is the right choice.
+//
+// Error contract: same `"<code>: <message>"` prefix the rest of the
+// `gh` surface uses (`gh_unavailable` / `gh_unauthenticated` /
+// `rate_limited` / fallback `gh_error`), routed through
+// `classify_gh_error` so the UI matches on the same prefixes it
+// already does for the Checks tab and the Merge button.
+
+/// Validate the user-supplied inputs to `github_pr_post_diff_comment`.
+/// Pure function — no I/O — so it's unit-testable without spawning `gh`.
+/// The IPC boundary is shell-injection-safe via `Command::args` (no
+/// shell), but refusing bad data at the IPC layer gives the user a
+/// clearer error than the one `gh` would surface (e.g. "422 line must
+/// be an integer" vs "Invalid line: 0 (expected line > 0)").
+///
+/// `side`: only "left" or "right" (after trim). GitHub's API only
+/// accepts those two values; an empty / uppercase / "LEFT" string would
+/// 422.
+/// `line`: must be > 0. The API treats 0 as "line not specified", which
+/// would 422.
+/// `commit_id`: must be exactly 40 ASCII hex chars (a SHA1). The
+/// length check catches empty / truncated / full-SHA-256 (64 chars)
+/// inputs in one shot.
+fn validate_post_diff_comment_args<'a>(
+    side: &'a str,
+    line: u32,
+    commit_id: &'a str,
+) -> Result<(&'a str, u32, &'a str), String> {
+    let side = side.trim();
+    if side != "left" && side != "right" {
+        return Err(format!(
+            "Invalid side: {:?} (expected 'left' or 'right')",
+            side
+        ));
+    }
+    if line == 0 {
+        return Err("Line must be greater than 0".into());
+    }
+    if commit_id.len() != 40 {
+        return Err(format!(
+            "Invalid commit_id length: {} (expected 40 hex chars for a SHA1)",
+            commit_id.len()
+        ));
+    }
+    if !commit_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "Invalid commit_id: {:?} (expected 40 hex chars for a SHA1)",
+            commit_id
+        ));
+    }
+    Ok((side, line, commit_id))
+}
+
+/// Blocking implementation: load the project, validate inputs, discover
+/// the owner/repo via `gh repo view`, then POST a new PR review comment
+/// via `gh api`. Returns the new comment's GitHub id (a positive u64).
+fn github_pr_post_diff_comment_blocking(
+    project_id: String,
+    pr_number: u64,
+    commit_id: String,
+    path: String,
+    line: u32,
+    side: String,
+    body: String,
+) -> Result<u64, String> {
+    let (side, line, commit_id) = validate_post_diff_comment_args(&side, line, &commit_id)?;
+    if pr_number == 0 {
+        return Err("PR number must be greater than 0".into());
+    }
+    // Path / body non-empty is also enforced (the IPC boundary is the
+    // only public-facing gate — the popover's local validation is just
+    // for UX, not security).
+    if path.trim().is_empty() {
+        return Err("Path is required".into());
+    }
+    if body.trim().is_empty() {
+        return Err("Comment body is required".into());
+    }
+    let project = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {}", project_id))?;
+    let cwd = std::path::PathBuf::from(&project.root_path);
+    if !cwd.exists() {
+        return Err(format!("project root path missing: {}", project.root_path));
+    }
+
+    // Step 1: discover the owner/repo via `gh repo view`. The
+    // `--json owner,nameWithOwner` form returns a tiny JSON object —
+    // we parse it directly rather than going through `-q` + a jq
+    // expression (avoids a shell quoting landmine and keeps the
+    // error path obvious).
+    let repo_out = Command::new("gh")
+        .args(["repo", "view", "--json", "owner,nameWithOwner"])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh repo view: {}", e))?;
+    let repo_stderr = String::from_utf8_lossy(&repo_out.stderr).into_owned();
+    if !repo_out.status.success() {
+        return Err(classify_gh_error(&repo_out.status, &repo_stderr).to_string());
+    }
+    let repo_stdout = String::from_utf8_lossy(&repo_out.stdout);
+    let repo_json: serde_json::Value = serde_json::from_str(&repo_stdout)
+        .map_err(|e| format!("gh_error: parse gh repo view: {} (raw: {})", e, repo_stdout))?;
+    // `nameWithOwner` is already "owner/name" — use it directly instead
+    // of re-joining `owner.login` + `name` (avoids a class of bugs
+    // where the two fields disagree on case).
+    let owner_repo = repo_json
+        .get("nameWithOwner")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            format!(
+                "gh_error: gh repo view JSON missing nameWithOwner (raw: {})",
+                repo_stdout
+            )
+        })?
+        .to_string();
+    if !owner_repo.contains('/') {
+        return Err(format!(
+            "gh_error: nameWithOwner did not look like 'owner/repo': {:?}",
+            owner_repo
+        ));
+    }
+
+    // Step 2: POST the review comment. The path is
+    // `repos/<owner>/<repo>/pulls/<n>/comments` — `owner_repo` already
+    // contains the slash, so no concat math needed.
+    let url = format!("repos/{}/pulls/{}/comments", owner_repo, pr_number);
+    // `line` ships via `-F` (raw field) so it serializes as a JSON int.
+    // The other fields are strings, so `-f` is the right form. The
+    // `key=value` shape (one string per arg) is the canonical
+    // `gh api` input; passing a bare value would fail with "missing
+    // field name".
+    let line_arg = format!("line={}", line);
+    let body_arg = format!("body={}", body);
+    let commit_id_arg = format!("commit_id={}", commit_id);
+    let path_arg = format!("path={}", path);
+    let side_arg = format!("side={}", side);
+    let out = Command::new("gh")
+        .args([
+            "api", &url,
+            "-f", &body_arg,
+            "-f", &commit_id_arg,
+            "-f", &path_arg,
+            "-F", &line_arg,
+            "-f", &side_arg,
+        ])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("gh_unavailable: failed to spawn gh api: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(classify_gh_error(&out.status, &stderr).to_string());
+    }
+    // Parse the `id` field from the response. GitHub returns the full
+    // comment object; we only need the id. The id is required to be
+    // a positive integer — if it's missing, 0, or a string, that's a
+    // shape change on the GitHub side and we want a loud error, not a
+    // silent u64 truncation.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("gh_error: parse gh api response: {} (raw: {})", e, stdout))?;
+    let id = parsed
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| {
+            format!(
+                "gh_error: gh api response missing positive integer id (raw: {})",
+                stdout
+            )
+        })?;
+    if id == 0 {
+        return Err(format!(
+            "gh_error: gh api response id was 0, not a positive integer (raw: {})",
+            stdout
+        ));
+    }
+    Ok(id)
+}
+
+/// IPC entry: post a local diff comment to a PR via `gh api`. Async +
+/// `spawn_blocking` per the long-running-IPC discipline — two `gh`
+/// subprocesses (the `repo view` + the `api` POST), each can take a
+/// few hundred ms on a cold PATH. Success returns the new GitHub
+/// review-comment id (a u64) which the caller stamps on the local
+/// `DiffInlineComment.remote_id` so the popover hides the "Post to
+/// GitHub" button on retry (the duplicate-post guard). Errors carry
+/// the same `"<code>: <message>"` prefix the rest of the `gh` surface
+/// uses (`gh_unavailable` / `gh_unauthenticated` / `rate_limited` /
+/// fallback `gh_error`); the popover maps the prefix to a toast kind.
+#[tauri::command]
+async fn github_pr_post_diff_comment(
+    project_id: String,
+    pr_number: u64,
+    commit_id: String,
+    path: String,
+    line: u32,
+    side: String,
+    body: String,
+) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_pr_post_diff_comment_blocking(project_id, pr_number, commit_id, path, line, side, body)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Enumerate every installed monospace font family on the system. Used by
 /// the Appearance picker so the user sees all real options, not just our
 /// curated probe list. Cached in-process via OnceLock.
@@ -5528,7 +7326,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder,
-            workspaces_list, workspace_create, workspace_create_multi, workspace_open_repo, workspace_importable_worktrees, workspace_import_worktree, workspace_archive, workspace_set_cli, workspace_set_custom_command, workspace_set_sandbox,
+            external_dir_link_add, external_dir_link_remove, workspace_repair_links,
+            workspaces_list, workspace_create, workspace_create_multi, workspace_open_repo, workspace_importable_worktrees, workspace_import_worktree, workspace_archive, workspace_restore, workspace_set_cli, workspace_set_custom_command, workspace_set_sandbox,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, workspace_sandbox_add_allowed_host, workspace_sandbox_add_allowed_path, workspace_sandbox_remove_allowed_path, workspace_recent_denials, workspace_test_sandbox,
             repo_config_load, repo_config_save, repo_config_scaffold, repo_config_add_allowed_host, repo_config_add_allowed_path,
             workspace_delete, workspace_run_script, workspace_run_script_stream, workspace_stop_script, workspace_record_spawn, workspace_set_has_history, workspace_set_agent_session_id,
@@ -5540,7 +7339,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             notify, open_path, home_dir, path_exists, log_line, pty_debug_append, terminal_stage_file,
             settings_load, settings_save, agents_save, agents_defaults, discover_repos, detect_clis,
-            list_monospace_fonts,
+            list_monospace_fonts, github_status, github_pr_checks_fetch, github_issue_fetch, linear_issue_fetch, github_pr_create, github_pr_merge, github_pr_post_diff_comment,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -5871,6 +7670,48 @@ mod tests {
         assert!(!s.contains("/x"));
     }
 
+    #[test]
+    fn utf8_locale_defaults_fill_missing_gui_locale() {
+        let parent = HashMap::new();
+        let spawn = HashMap::new();
+        let defaults = utf8_locale_defaults(&parent, &spawn);
+        assert_eq!(
+            defaults,
+            vec![
+                ("LANG", "en_US.UTF-8".into()),
+                ("LC_CTYPE", "en_US.UTF-8".into()),
+            ],
+        );
+    }
+
+    #[test]
+    fn utf8_locale_defaults_preserve_existing_utf8_locale() {
+        let mut parent = HashMap::new();
+        parent.insert("LANG".into(), "ko_KR.UTF-8".into());
+        parent.insert("LC_CTYPE".into(), "ko_KR.UTF-8".into());
+        let spawn = HashMap::new();
+        assert!(utf8_locale_defaults(&parent, &spawn).is_empty());
+    }
+
+    #[test]
+    fn utf8_locale_defaults_do_not_override_spawn_locale() {
+        let parent = HashMap::new();
+        let mut spawn = HashMap::new();
+        spawn.insert("LC_ALL".into(), "C".into());
+        assert!(utf8_locale_defaults(&parent, &spawn).is_empty());
+    }
+
+    #[test]
+    fn utf8_locale_defaults_fix_non_utf8_character_classification() {
+        let mut parent = HashMap::new();
+        parent.insert("LANG".into(), "C".into());
+        let spawn = HashMap::new();
+        assert_eq!(
+            utf8_locale_defaults(&parent, &spawn),
+            vec![("LC_CTYPE", "en_US.UTF-8".into())],
+        );
+    }
+
     // ──────────────── spotlight git mechanics ────────────────
 
     /// Initialize a bare git repo at `path` with one commit so HEAD and
@@ -6084,5 +7925,774 @@ mod tests {
         // The branch ref STILL hasn't moved through all of this.
         assert_eq!(git_rev(main, "main"), main_ref_before, "main ref never moved");
         assert_eq!(git_head(main), git_head(&wt), "repo root HEAD == worktree HEAD");
+    }
+
+    fn link_proj(names_paths: &[(&str, &str)]) -> Project {
+        Project {
+            id: "p1".into(),
+            name: "test".into(),
+            external_dir_links: names_paths.iter()
+                .map(|(n, p)| ExternalDirLink { name: (*n).into(), target_path: (*p).into() })
+                .collect(),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn validate_link_name_rejects_bad_inputs() {
+        assert!(validate_link_name("").is_err());
+        assert!(validate_link_name("   ").is_err());
+        assert!(validate_link_name("a/b").is_err());
+        assert!(validate_link_name("../secrets").is_err());
+        assert!(validate_link_name("a..b").is_err());
+        assert!(validate_link_name(".hidden").is_err());
+        assert!(validate_link_name(".").is_err());
+        assert!(validate_link_name("shared-docs").is_ok());
+        assert!(validate_link_name("notes_2024").is_ok());
+        assert!(validate_link_name("  shared-docs  ").is_ok());
+    }
+
+    #[test]
+    fn materialize_applies_symlink_for_valid_link() {
+        let wt = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let proj = link_proj(&[("shared-docs", target.path().to_str().unwrap())]);
+        let out = materialize_external_dir_links(&proj, wt.path());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("applied: shared-docs"));
+        let link = wt.path().join("shared-docs");
+        assert!(link.symlink_metadata().is_ok(), "symlink should exist");
+        let resolved = fs::read_link(&link).unwrap();
+        assert_eq!(resolved, target.path());
+    }
+
+    #[test]
+    fn materialize_skips_when_real_file_occupies_link_path() {
+        let wt = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let collision = wt.path().join("shared-docs");
+        fs::write(&collision, "do not clobber me\n").unwrap();
+        let proj = link_proj(&[("shared-docs", target.path().to_str().unwrap())]);
+        let out = materialize_external_dir_links(&proj, wt.path());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("skipped (existing real path)"));
+        assert_eq!(fs::read_to_string(&collision).unwrap(), "do not clobber me\n");
+    }
+
+    #[test]
+    fn materialize_is_noop_when_symlink_already_correct() {
+        let wt = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), wt.path().join("shared-docs")).unwrap();
+        let proj = link_proj(&[("shared-docs", target.path().to_str().unwrap())]);
+        let out = materialize_external_dir_links(&proj, wt.path());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("exists (symlink OK)"));
+    }
+
+    // ──────────────── restore archived workspace (Task 12) ────────────────
+
+    fn proj_for(root: &Path) -> Project {
+        Project {
+            root_path: root.to_string_lossy().into_owned(),
+            ..Project::default()
+        }
+    }
+
+    fn ws_archived(branch: &str, path: &Path) -> Workspace {
+        Workspace {
+            id: "ws-1".into(),
+            archived: true,
+            branch: branch.into(),
+            path: path.to_string_lossy().into_owned(),
+            ..Workspace::default()
+        }
+    }
+
+    #[test]
+    fn restore_validate_rejects_repo_root_workspace() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        let proj = proj_for(dir.path());
+        let mut w = ws_archived("main", &dir.path().join("wt"));
+        w.is_repo_root = true;
+        let err = workspace_restore_validate(&w, &proj).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("repo-root"),
+            "error should mention repo-root, got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_validate_rejects_missing_branch() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        let proj = proj_for(dir.path());
+        let w = ws_archived("definitely-not-a-real-branch", &dir.path().join("wt"));
+        let err = workspace_restore_validate(&w, &proj).unwrap_err();
+        assert!(
+            err.contains("branch 'definitely-not-a-real-branch' no longer exists"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_validate_rejects_non_git_project() {
+        let dir = tempdir().unwrap();
+        let mut proj = proj_for(dir.path());
+        proj.non_git = true;
+        let w = ws_archived("main", &dir.path().join("wt"));
+        let err = workspace_restore_validate(&w, &proj).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("non-git"),
+            "error should mention non-git, got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_validate_returns_saved_path_for_valid_workspace() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        let proj = proj_for(dir.path());
+        let wt = dir.path().join("wt");
+        let w = ws_archived("main", &wt);
+        let out = workspace_restore_validate(&w, &proj).unwrap();
+        assert_eq!(out, wt, "validate should round-trip the saved worktree path");
+    }
+
+    // ──────────────── gh PR + checks fetch (Task 8) ────────────────
+
+    /// Wire-format test: the JSON we emit on the IPC channel (snake_case
+    /// per CLAUDE.md) round-trips through `GitHubPullRequest` and a
+    /// `Vec<GitHubCheckRun>` losslessly. Mirrors what the real
+    /// `gh_pr_view_blocking` and `gh_pr_checks_list_blocking` produce
+    /// after the camelCase→snake_case DTO mapping — i.e. the bytes
+    /// the UI actually sees.
+    #[test]
+    fn pr_checks_wire_format_round_trips() {
+        // Realistic PR payload in the wire shape (snake_case).
+        let pr_json = r#"{
+            "number": 42,
+            "title": "Fix widget alignment",
+            "body": "Closes #41.",
+            "state": "OPEN",
+            "head_ref": "feature/widget",
+            "base_ref": "main",
+            "html_url": "https://github.com/acme/widgets/pull/42",
+            "draft": false,
+            "checks_passing": null
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(pr_json)
+            .expect("pr wire format must deserialize");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.title, "Fix widget alignment");
+        assert_eq!(pr.body.as_deref(), Some("Closes #41."));
+        assert_eq!(pr.state, "OPEN");
+        assert_eq!(pr.head_ref, "feature/widget");
+        assert_eq!(pr.base_ref, "main");
+        assert_eq!(pr.html_url, "https://github.com/acme/widgets/pull/42");
+        assert!(!pr.draft);
+        assert_eq!(pr.checks_passing, None);
+
+        // Realistic check-run payload in the wire shape (snake_case).
+        let checks_json = r#"[
+            {
+                "id": 0,
+                "name": "build",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-06-07T10:00:00Z",
+                "completed_at": "2026-06-07T10:05:30Z",
+                "html_url": "https://github.com/acme/widgets/actions/runs/123"
+            },
+            {
+                "id": 1,
+                "name": "lint",
+                "status": "in_progress",
+                "conclusion": null,
+                "started_at": "2026-06-07T10:00:00Z",
+                "completed_at": null,
+                "html_url": "https://github.com/acme/widgets/actions/runs/124"
+            }
+        ]"#;
+        let checks: Vec<GitHubCheckRun> = serde_json::from_str(checks_json)
+            .expect("checks wire format must deserialize");
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].status, "completed");
+        assert_eq!(checks[0].conclusion.as_deref(), Some("success"));
+        assert_eq!(checks[0].html_url, "https://github.com/acme/widgets/actions/runs/123");
+        assert!(checks[0].completed_at.is_some());
+        assert_eq!(checks[1].name, "lint");
+        assert_eq!(checks[1].status, "in_progress");
+        assert!(checks[1].conclusion.is_none());
+        assert!(checks[1].completed_at.is_none());
+
+        // Bundle round-trips too — the actual IPC return type.
+        let bundle = PullRequestWithChecks {
+            pr: Some(pr),
+            checks,
+        };
+        let serialized = serde_json::to_string(&bundle).unwrap();
+        assert!(serialized.contains("https://github.com/acme/widgets/pull/42"));
+
+        // The `pr` field is `Option` — must serialize as JSON `null` when
+        // absent, not omitted (UI distinguishes "not fetched yet" from
+        // "no PR for this branch" via the explicit null).
+        let bundle_empty = PullRequestWithChecks {
+            pr: None,
+            checks: vec![],
+        };
+        let s = serde_json::to_string(&bundle_empty).unwrap();
+        assert!(s.contains("\"pr\":null"),
+            "pr=null must serialize as JSON null, got: {s}");
+    }
+
+    /// `classify_gh_error` must produce the stable error-code prefixes
+    /// the UI matches on (`gh_unavailable`, `gh_unauthenticated`,
+    /// `rate_limited`, fallback `gh_error`). The UI does
+    /// `err.startsWith("<code>:")` to pick the right empty state.
+    #[test]
+    fn classify_gh_error_emits_stable_codes() {
+        // We can't easily construct a real `ExitStatus` without spawning
+        // a process, but `classify_gh_error` only inspects it via
+        // `status.success()` for the "empty stderr" branch. Use a known
+        // failure status by exiting a true command.
+        let failed = std::process::Command::new("false").status().unwrap();
+        let ok = std::process::Command::new("true").status().unwrap();
+
+        // 1. `gh` missing / exited with no stderr → "gh_unavailable"
+        let e = classify_gh_error(&failed, "").to_string();
+        assert!(e.starts_with("gh_unavailable:"),
+            "empty-stderr failure must be gh_unavailable, got: {e}");
+
+        // 2. Auth message → "gh_unauthenticated" (matched on stderr text)
+        let e = classify_gh_error(&failed,
+            "To log in, run: gh auth login\n").to_string();
+        assert!(e.starts_with("gh_unauthenticated:"),
+            "auth hint must be gh_unauthenticated, got: {e}");
+
+        // 3. Rate limit → "rate_limited"
+        let e = classify_gh_error(&failed,
+            "API rate limit exceeded for user X (5000/hr)").to_string();
+        assert!(e.starts_with("rate_limited:"),
+            "rate limit must be rate_limited, got: {e}");
+
+        // 4. Anything else → "gh_error" (UI falls back to toast)
+        let e = classify_gh_error(&failed,
+            "unexpected network error: connection reset").to_string();
+        assert!(e.starts_with("gh_error:"),
+            "unknown error must be gh_error, got: {e}");
+
+        // 5. `success()` exits bypass the "no stderr" branch — even with
+        // empty stderr, we shouldn't emit "gh_unavailable" for a 0 exit.
+        // (Not a real scenario for a failed gh call, but pins the
+        // branch condition so a refactor doesn't accidentally widen it.)
+        let e = classify_gh_error(&ok, "").to_string();
+        assert!(e.starts_with("gh_error:"),
+            "zero-exit with empty stderr must fall through to gh_error, got: {e}");
+    }
+
+    // ──────────────── gh issue URL parsing (Task 9) ────────────────
+
+    /// `parse_github_issue_url` is the gate between user-pasted input
+    /// and the `gh api` subprocess — every bad URL must surface as
+    /// "Unsupported issue URL: ..." (or "Linear authentication not
+    /// configured" for linear.app), and every good URL must
+    /// round-trip into (owner, repo, number). Covers the cases the
+    /// QA scenarios call out: a real GitHub URL parses; example.com
+    /// gets "Unsupported issue URL"; a Linear URL gets the
+    /// configured-for-Linear error.
+    #[test]
+    fn parse_github_issue_url_recognises_supported_schemes() {
+        // ───── valid URLs (positive cases) ─────
+        let cases: &[(&str, (String, String, u64))] = &[
+            ("https://github.com/acme/app/issues/123", ("acme".into(), "app".into(), 123)),
+            ("https://github.com/simion/termic/issues/1", ("simion".into(), "termic".into(), 1)),
+            ("https://GitHub.com/acme/app/issues/42", ("acme".into(), "app".into(), 42)),
+            ("  https://github.com/acme/app/issues/7  ", ("acme".into(), "app".into(), 7)),
+            ("https://github.com/my_org/my.repo.js/issues/9999",
+             ("my_org".into(), "my.repo.js".into(), 9999)),
+        ];
+        for (input, expected) in cases {
+            let got = parse_github_issue_url(input)
+                .unwrap_or_else(|e| panic!("expected {input} to parse, got err: {e}"));
+            assert_eq!(got, *expected, "input: {input}");
+        }
+
+        // ───── invalid URLs (negative cases) ─────
+        // The error prefix is what the UI matches on — pin only the
+        // prefix, not the exact message, so future message tweaks
+        // don't break the test.
+        let bad: &[&str] = &[
+            // empty / whitespace
+            "",
+            "   ",
+            // missing scheme
+            "github.com/acme/app/issues/1",
+            // wrong scheme
+            "ftp://github.com/acme/app/issues/1",
+            "http://github.com/acme/app/issues/1",   // plain http rejected
+            // wrong host
+            "https://example.com/acme/app/issues/1",
+            "https://gitlab.com/acme/app/issues/1",
+            "https://api.github.com/repos/acme/app/issues/1",
+            // wrong path shape
+            "https://github.com/acme/app",                 // no /issues/N
+            "https://github.com/acme/app/",               // trailing slash
+            "https://github.com/acme/app/issues/",         // missing number
+            "https://github.com/acme/app/pulls/1",         // PR URL, not issue
+            "https://github.com/acme/app/issues/1/extra", // extra segment
+            "https://github.com/acme/app/issues/1?foo=1",  // query string
+            "https://github.com/acme/app/issues/1#anchor", // fragment
+            // empty owner/repo
+            "https://github.com//app/issues/1",
+            "https://github.com/acme//issues/1",
+            // invalid characters in owner/repo
+            "https://github.com/acme$/app/issues/1",
+            // non-positive number
+            "https://github.com/acme/app/issues/0",
+            "https://github.com/acme/app/issues/abc",
+            "https://github.com/acme/app/issues/-1",
+        ];
+        for input in bad {
+            let result = parse_github_issue_url(input);
+            assert!(result.is_err(), "expected {input:?} to be rejected, got Ok: {:?}", result.ok());
+            let err = result.unwrap_err();
+            let ok_prefix = err.starts_with("Unsupported issue URL: ")
+                || err == "Linear authentication not configured";
+            assert!(ok_prefix, "unexpected error shape for {input:?}: {err}");
+        }
+
+        // ───── Linear short-circuit ─────
+        // Runs BEFORE the generic GitHub check; the user-facing
+        // error must be the Linear one, not "Unsupported issue URL".
+        let r = parse_github_issue_url("https://linear.app/termic/issue/ABC-123");
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err(), "Linear authentication not configured");
+    }
+
+    // ──────────────── issue URL parsing — both schemes (Task 15) ────────────────
+
+    /// `parse_issue_url` is the Task 15 unified parser. It accepts
+    /// BOTH GitHub and Linear URLs and returns a `ParsedIssueUrl`
+    /// with the right kind + payload. The existing
+    /// `parse_github_issue_url_recognises_supported_schemes` test
+    /// still pins the GitHub-only path; this test covers the
+    /// Linear happy path + the cross-scheme dispatch + invalid
+    /// inputs the GitHub test would have routed to its own
+    /// rejection list. Covers the QA scenarios: a real Linear URL
+    /// (`ENG-1234` + UUID) parses, a private Linear URL (same shape
+    /// — the server can't tell public vs private at parse time)
+    /// also parses, and an unknown URL like `https://example.com/nope`
+    /// surfaces "Unsupported issue URL".
+    #[test]
+    fn parse_issue_url_handles_both_schemes() {
+        // ───── Linear positive cases (Task 15 QA) ─────
+        // The human `ENG-1234` form.
+        let r = parse_issue_url("https://linear.app/termic/issue/ENG-1234")
+            .expect("Linear ENG-1234 URL must parse");
+        assert_eq!(r.kind, IssueUrlKind::Linear);
+        assert_eq!(r.linear.as_deref(), Some("ENG-1234"));
+        assert!(r.github.is_none(),
+            "Linear URL must not populate github tuple, got: {:?}", r.github);
+
+        // The UUID form (Linear's actual issue id for non-team-key
+        // workspaces is a UUID). The id charset accepts `[A-Za-z0-9-]+`
+        // which covers hex + hyphens.
+        let r = parse_issue_url("https://linear.app/termic/issue/0a1b2c3d-4e5f-6789-abcd-ef0123456789")
+            .expect("Linear UUID URL must parse");
+        assert_eq!(r.kind, IssueUrlKind::Linear);
+        assert_eq!(r.linear.as_deref(), Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789"));
+        assert!(r.github.is_none());
+
+        // Case-insensitive host. Linear.app / LINEAR.APP / Linear.App
+        // all resolve. The dialog regex mirror uses the /i flag too.
+        let r = parse_issue_url("https://Linear.app/termic/issue/ENG-7")
+            .expect("Mixed-case Linear host must parse");
+        assert_eq!(r.kind, IssueUrlKind::Linear);
+        assert_eq!(r.linear.as_deref(), Some("ENG-7"));
+
+        // Leading/trailing whitespace stripped (matches the GitHub
+        // parser's trim behavior — the dialog might paste with a
+        // stray space).
+        let r = parse_issue_url("  https://linear.app/termic/issue/ENG-1  ")
+            .expect("Whitespace-padded Linear URL must parse");
+        assert_eq!(r.linear.as_deref(), Some("ENG-1"));
+
+        // ───── GitHub positive cases (regression — Task 9 contract) ─────
+        // The unified parser delegates to `parse_github_issue_url` for
+        // the github branch; the payload it returns must be identical
+        // to what `parse_github_issue_url` would have returned, so
+        // the GitHub IPC + the future unified dispatcher agree.
+        let r = parse_issue_url("https://github.com/acme/app/issues/123")
+            .expect("GitHub URL must parse via parse_issue_url");
+        assert_eq!(r.kind, IssueUrlKind::Github);
+        assert_eq!(r.github, Some(("acme".into(), "app".into(), 123)));
+        assert!(r.linear.is_none(),
+            "GitHub URL must not populate linear id, got: {:?}", r.linear);
+
+        // ───── invalid URLs (negative cases) ─────
+        // Anything that isn't GitHub or Linear surfaces as
+        // "Unsupported issue URL: …". Pin only the prefix so a
+        // future copy tweak doesn't break the test (same pattern as
+        // the Task 9 test).
+        let bad: &[&str] = &[
+            // empty / whitespace
+            "",
+            "   ",
+            // missing scheme
+            "github.com/acme/app/issues/1",
+            "linear.app/termic/issue/ENG-1",
+            // wrong scheme (the GitHub parser accepts http for the
+            // POST / put into the GitHub half, but the unified
+            // parser only takes https:// — cleaner UX)
+            "http://github.com/acme/app/issues/1",
+            "ftp://github.com/acme/app/issues/1",
+            // unknown host
+            "https://example.com/nope",
+            "https://gitlab.com/acme/app/issues/1",
+            // wrong GitHub path shape
+            "https://github.com/acme/app/pulls/1",   // PR URL
+            "https://github.com/acme/app/issues/1/extra",
+            // wrong Linear path shape
+            "https://linear.app/termic/",            // no /issue/<id>
+            "https://linear.app/termic/issue/",      // missing id
+            "https://linear.app/termic/issue/ENG-1/extra",
+            "https://linear.app/termic/issues/ENG-1", // plural, not "issue"
+            "https://linear.app/termic/issue/ENG-1?foo=1",
+            "https://linear.app/termic/issue/ENG-1#anchor",
+            // empty workspace
+            "https://linear.app//issue/ENG-1",
+            // invalid workspace chars
+            "https://linear.app/te$rmic/issue/ENG-1",
+            // id too short (the length-3 floor)
+            "https://linear.app/termic/issue/E",
+            "https://linear.app/termic/issue/E-",
+            // invalid id chars
+            "https://linear.app/termic/issue/ENG_123", // underscore not allowed in id
+            "https://linear.app/termic/issue/ENG 123", // space not allowed
+        ];
+        for input in bad {
+            let result = parse_issue_url(input);
+            assert!(result.is_err(), "expected {input:?} to be rejected, got Ok: {:?}", result.ok());
+            let err = result.unwrap_err();
+            assert!(err.starts_with("Unsupported issue URL: "),
+                "unexpected error shape for {input:?}: {err}");
+        }
+
+        // ───── `ParsedIssueUrl` wire format round-trips ─────
+        // The dialog regex mirror constructs a `ParsedIssueUrl`-
+        // shaped object on the TS side; the snake_case wire format
+        // must match what the Rust side expects when (in the
+        // future) the dialog sends the parsed payload to the
+        // backend. Today the dialog just dispatches based on the
+        // kind + a regex, but pinning the wire format now means a
+        // future "send the parsed URL" PR doesn't have to chase
+        // the shape.
+        let json = r#"{
+            "kind": "linear",
+            "github": null,
+            "linear": "ENG-1234"
+        }"#;
+        let parsed: ParsedIssueUrl = serde_json::from_str(json)
+            .expect("ParsedIssueUrl wire format must deserialize");
+        assert_eq!(parsed.kind, IssueUrlKind::Linear);
+        assert_eq!(parsed.linear.as_deref(), Some("ENG-1234"));
+        assert!(parsed.github.is_none());
+
+        // And the `kind` enum serializes snake_case to match
+        // `IssueSource`'s convention (Task 1).
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(s.contains("\"kind\":\"linear\""),
+            "kind must serialize as snake_case, got: {s}");
+        assert!(s.contains("\"github\":null"));
+        assert!(s.contains("\"linear\":\"ENG-1234\""));
+    }
+
+    /// `IssueSeed` round-trips through the wire format the UI sees
+    /// (snake_case, `body: Option<String>`). Mirrors the wire test
+    /// for `PullRequestWithChecks` from Task 8.
+    #[test]
+    fn issue_seed_wire_format_round_trips() {
+        let json = r#"{
+            "source": "github",
+            "url": "https://github.com/acme/app/issues/42",
+            "title": "Fix login bug",
+            "body": "Steps to reproduce:\n1. ...\n2. ..."
+        }"#;
+        let seed: IssueSeed = serde_json::from_str(json)
+            .expect("IssueSeed wire format must deserialize");
+        assert_eq!(seed.source, IssueSource::Github);
+        assert_eq!(seed.url, "https://github.com/acme/app/issues/42");
+        assert_eq!(seed.title, "Fix login bug");
+        assert!(seed.body.is_some());
+        let s = serde_json::to_string(&seed).unwrap();
+        assert!(s.contains("\"source\":\"github\""));
+        assert!(s.contains("\"title\":\"Fix login bug\""));
+        assert!(s.contains("\"body\":"));
+
+        // body = null is a valid shape for an empty body. The dialog
+        // checks `body == null` to render the "no body" empty state.
+        let json_no_body = r#"{
+            "source": "github",
+            "url": "https://github.com/acme/app/issues/43",
+            "title": "Empty",
+            "body": null
+        }"#;
+        let seed: IssueSeed = serde_json::from_str(json_no_body).unwrap();
+        assert!(seed.body.is_none(), "null body must deserialize as None");
+    }
+
+    // ──────────────── gh PR create URL extraction (Task 10) ────────────────
+
+    /// `gh pr create` prints the PR URL to stdout, terminated by `\n`.
+    /// Windows versions sometimes pad with `\r\n`; older versions
+    /// have been seen to print a leading "Created:" prefix. The
+    /// extractor is the only thing standing between the raw stdout
+    /// and a `gh pr view <url>` follow-up call, so it has to (a) be
+    /// tolerant of trailing whitespace, (b) find the URL even when
+    /// it's NOT the first line, and (c) reject anything that doesn't
+    /// look like a GitHub PR URL so the follow-up gets a clean error
+    /// instead of "not a pull request". This is the QA scenario the
+    /// plan spec calls out ("URL extraction from `gh pr create`
+    /// stdout").
+    #[test]
+    fn extract_pr_url_from_gh_output_handles_real_world_shapes() {
+        // ─── positive cases ───
+        // The happy path: bare URL, no leading whitespace, single LF.
+        let got = extract_pr_url_from_gh_output("https://github.com/acme/app/pull/42\n")
+            .expect("plain URL on one line must parse");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // Trailing CRLF (Windows). `trim()` strips both.
+        let got = extract_pr_url_from_gh_output("https://github.com/acme/app/pull/42\r\n")
+            .expect("CRLF-terminated URL must parse");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // No trailing newline at all (e.g. captured mid-stream by a
+        // pipe that didn't flush the LF).
+        let got = extract_pr_url_from_gh_output("https://github.com/acme/app/pull/42")
+            .expect("URL with no trailing newline must parse");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // Multi-line stdout — the URL isn't necessarily the first
+        // line. Some `gh` versions print a "Creating pull request..."
+        // banner on the first line, then the URL on the second.
+        let got = extract_pr_url_from_gh_output(
+            "Creating pull request for feature/widget into main in acme/app\n\
+             https://github.com/acme/app/pull/42\n",
+        ).expect("URL on the last non-empty line must be found");
+        assert_eq!(got, "https://github.com/acme/app/pull/42");
+
+        // Plain-HTTP fallback (rare but legal — older enterprise
+        // GHE setups).
+        let got = extract_pr_url_from_gh_output("http://github.com/acme/app/pull/7\n")
+            .expect("plain http:// GitHub URL must parse");
+        assert_eq!(got, "http://github.com/acme/app/pull/7");
+
+        // ─── negative cases ───
+        // Empty stdout — `gh` ran but printed nothing. This is the
+        // shape that should produce a clear "no URL" error so the
+        // UI can surface a useful toast.
+        let err = extract_pr_url_from_gh_output("").expect_err("empty stdout must reject");
+        assert!(err.contains("no URL"), "empty-stdout err must mention 'no URL', got: {err}");
+
+        // Whitespace-only stdout.
+        let err = extract_pr_url_from_gh_output("   \n\n").expect_err("whitespace stdout must reject");
+        assert!(err.contains("no URL"), "whitespace err must mention 'no URL', got: {err}");
+
+        // Stdout is a real gh message but no PR URL inside it. (e.g.
+        // gh asked for a confirmation interactively and exited with
+        // a help message.)
+        let err = extract_pr_url_from_gh_output("Welcome to GitHub CLI!\n")
+            .expect_err("banner-only stdout must reject");
+        assert!(err.contains("no URL"), "no-URL err must mention 'no URL', got: {err}");
+
+        // Stdout is a GitHub URL but NOT a /pull/ URL — could be a
+        // repo or an issue page. We must reject it explicitly so a
+        // future `gh pr view <wrong-url>` doesn't surface as a
+        // confusing "not a pull request" instead of a clean error
+        // at the dialog layer.
+        let err = extract_pr_url_from_gh_output("https://github.com/acme/app/issues/42\n")
+            .expect_err("issue URL must reject (not a PR URL)");
+        assert!(err.contains("no URL") || err.contains("GitHub PR URL"),
+            "issue-URL err must explain the rejection, got: {err}");
+
+        // Different host entirely.
+        let err = extract_pr_url_from_gh_output("https://gitlab.com/acme/app/-/merge_requests/1\n")
+            .expect_err("non-GitHub URL must reject");
+        assert!(err.contains("GitHub PR URL"),
+            "non-GitHub err must mention the GitHub-PR-URL shape, got: {err}");
+    }
+
+    // ──────────────── gh pr merge method validation (Task 13) ────────────────
+
+    /// `validate_pr_merge_method` is the only input gate for the
+    /// Merge button IPC. It must (a) accept the three `gh`-documented
+    /// methods verbatim, (b) accept them with surrounding whitespace
+    /// (paste-from-clipboard, the same defensive trim pattern the
+    /// other gh surfaces use), and (c) reject anything else with an
+    /// error that names the bad input so a frontend bug surfaces
+    /// clearly. The function is the public-boundary defense against
+    /// shell-injection — even though `Command::args` doesn't go
+    /// through a shell, refusing unknown strings at the IPC layer
+    /// gives a clearer error than `gh`'s "unknown flag" response.
+    #[test]
+    fn validate_pr_merge_method_accepts_documented_set() {
+        // Positive cases — the exact three methods `gh pr merge`
+        // documents for `--<method>`.
+        for m in ["merge", "squash", "rebase"] {
+            let got = validate_pr_merge_method(m)
+                .unwrap_or_else(|e| panic!("{m:?} must be accepted, got err: {e}"));
+            assert_eq!(got, m, "validator must return the input unchanged");
+        }
+
+        // Whitespace tolerance — paste-from-clipboard often carries a
+        // trailing `\n` or spaces. The validator trims, then matches.
+        for m in ["merge", " merge ", "\tsquash\n", "  rebase  "] {
+            let got = validate_pr_merge_method(m)
+                .unwrap_or_else(|e| panic!("{m:?} (with whitespace) must be accepted, got err: {e}"));
+            assert_eq!(got, m.trim(), "validator must return the trimmed value");
+        }
+
+        // Negative cases — anything outside the fixed set. The
+        // error message must name the bad input (so a frontend bug
+        // surfaces clearly) AND list the allowed set (so a future
+        // maintainer reading the error learns the contract).
+        // Note: "merge " (with trailing space) is in the POSITIVE
+        // set above because the validator trims first — including it
+        // here would be self-contradictory. The exact-match bad
+        // cases verify case-sensitivity ("MERGE" / "Merge" reject)
+        // and the kind of input a frontend bug might pass through
+        // ("fast-forward" / "rm" / "--delete-branch").
+        for bad in ["", "fast-forward", "MERGE", "Merge", "rm", "--delete-branch"] {
+            let err = validate_pr_merge_method(bad)
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(
+                err.contains("Invalid merge method"),
+                "rejection of {bad:?} must explain itself, got: {err}",
+            );
+            assert!(
+                err.contains("merge") && err.contains("squash") && err.contains("rebase"),
+                "rejection must list the allowed set, got: {err}",
+            );
+        }
+    }
+
+    // ──────────────── gh pr post diff comment validation (Task 14) ────────────────
+
+    /// `validate_post_diff_comment_args` is the only input gate between
+    /// the frontend and the `gh api` subprocess for posting a local
+    /// diff comment. The validation must (a) accept the two `side`
+    /// values GitHub's review-comments API documents, (b) accept them
+    /// with surrounding whitespace (paste-from-clipboard), (c) accept
+    /// any line > 0, (d) accept any 40-char hex string as a commit SHA1,
+    /// and (e) reject everything else with an error that names the bad
+    /// input. The popover disables the button when `pr` is null, so
+    /// the validation here is the last defense against a frontend bug
+    /// passing `pr: null` + a stale comment.
+    #[test]
+    fn validate_post_diff_comment_args_accepts_valid_inputs() {
+        // ───── positive cases: side ─────
+        // The two values GitHub's review-comments API documents for
+        // `side`. The validator trims first, so surrounding whitespace
+        // is tolerated (paste-from-clipboard, the same defensive
+        // pattern the rest of the gh surface uses).
+        let sha_zeros = "0".repeat(40);
+        let sha_ones = "1".repeat(40);
+        for side in ["left", "right", " left ", "\tright\n"] {
+            let (got_side, got_line, got_sha) =
+                validate_post_diff_comment_args(side, 1, &sha_zeros)
+                    .unwrap_or_else(|e| panic!("{side:?} must be accepted, got err: {e}"));
+            assert_eq!(got_side, side.trim());
+            assert_eq!(got_line, 1);
+            assert_eq!(got_sha, sha_zeros);
+        }
+
+        // ───── positive cases: line ─────
+        // Any line > 0 is valid — the API treats 0 as "unspecified"
+        // and 422s, so the validator pins the lower bound.
+        for line in [1u32, 2, 100, 9999, u32::MAX] {
+            let (_, got_line, _) = validate_post_diff_comment_args("right", line, &sha_ones)
+                .unwrap_or_else(|e| panic!("line={line} must be accepted, got err: {e}"));
+            assert_eq!(got_line, line);
+        }
+
+        // ───── positive cases: commit_id ─────
+        // A 40-char hex string with mixed case is the canonical
+        // GitHub SHA1 shape. We don't pin to a specific public commit
+        // (those can be force-pushed away) — just the shape.
+        let real_sha = "0123456789abcdef0123456789ABCDEF01234567";
+        let (_, _, got_sha) = validate_post_diff_comment_args("right", 1, real_sha)
+            .unwrap_or_else(|e| panic!("valid SHA1 must be accepted, got err: {e}"));
+        assert_eq!(got_sha, real_sha);
+
+        // ───── negative cases: side ─────
+        // Anything outside the {left, right} set must reject with an
+        // error that names the bad input AND lists the allowed set.
+        // The error prefix is what the UI matches on, so pin the
+        // prefix in the assertion (not the exact message — future
+        // message tweaks shouldn't break the test).
+        for bad in ["", "LEFT", "Right", "both", "L", "R", "leftt"] {
+            let err = validate_post_diff_comment_args(bad, 1, real_sha)
+                .expect_err(&format!("side={bad:?} must be rejected"));
+            assert!(
+                err.starts_with("Invalid side:"),
+                "side rejection must start with 'Invalid side:', got: {err}",
+            );
+            assert!(
+                err.contains("'left'") && err.contains("'right'"),
+                "side rejection must list the allowed set, got: {err}",
+            );
+        }
+
+        // ───── negative cases: line ─────
+        // line == 0 must reject. The error must name the bad value so
+        // a frontend bug surfaces clearly.
+        let err = validate_post_diff_comment_args("right", 0, real_sha)
+            .expect_err("line=0 must be rejected");
+        assert!(
+            err.contains("Line must be greater than 0"),
+            "line=0 rejection must explain itself, got: {err}",
+        );
+
+        // ───── negative cases: commit_id length ─────
+        // Empty / truncated / SHA-256 (64 chars) must all reject with
+        // a length error. The shape-of-SHA matters here — `gh` would
+        // 422 with a confusing "No commit found for SHA" if we passed
+        // a 64-char SHA1 expecting 40, so catching the length at the
+        // IPC boundary saves a round trip + a bad toast.
+        for (bad, desc) in [
+            ("", "empty"),
+            ("abc", "too short"),
+            ("0".repeat(39).as_str(), "39 chars (one short of SHA1)"),
+            ("0".repeat(64).as_str(), "64 chars (SHA-256 length)"),
+        ] {
+            let err = validate_post_diff_comment_args("right", 1, bad)
+                .expect_err(&format!("commit_id {desc} must be rejected"));
+            assert!(
+                err.contains("Invalid commit_id length"),
+                "length rejection must explain itself for {desc}, got: {err}",
+            );
+            assert!(
+                err.contains("40 hex chars"),
+                "length rejection must mention '40 hex chars' for {desc}, got: {err}",
+            );
+        }
+
+        // ───── negative cases: commit_id charset ─────
+        // Right length but non-hex chars must reject. The hex check
+        // catches GH-style SHA1 prefixes ("0123456") even when the
+        // length is right (40 chars), AND catches gits like
+        // "z1234567890abcdef0123456789ABCDEF012345" that happen to
+        // have a non-hex char embedded.
+        let bad_sha = "z".repeat(40);
+        let err = validate_post_diff_comment_args("right", 1, &bad_sha)
+            .expect_err("non-hex commit_id must be rejected");
+        assert!(
+            err.contains("Invalid commit_id:") && err.contains("40 hex chars"),
+            "charset rejection must explain itself, got: {err}",
+        );
     }
 }

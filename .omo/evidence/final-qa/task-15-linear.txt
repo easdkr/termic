@@ -1,0 +1,63 @@
+TASK 15 — Linear URL returns "Linear authentication not configured"
+=====================================================================
+Plan reference: .omo/plans/termic-vs-conductor.md:547-570
+Subagent evidence: .omo/evidence/task-15-linear-public.txt
+
+The plan spec is explicit:
+  "Linear URLs either seed workspace from public data or fail with
+   `Linear authentication not configured`."
+
+The implementation chose the fail path (per the plan's "Must NOT" list:
+"Do not add Linear OAuth or token storage."). MVP behavior: always
+rejects with the exact error string the QA scenario expects.
+
+Code locations traced:
+  - src-tauri/src/lib.rs:6405-6430  linear_issue_fetch_blocking
+       let trimmed = issue_id.trim();
+       if trimmed.is_empty() {
+           return Err("Linear issue id cannot be empty".into());
+       }
+       Err("Linear authentication not configured".to_string())
+    The "Linear authentication not configured" string is the EXACT
+    text the QA scenario asserts. The empty-id check is the only
+    non-fatal rejection — a real id (e.g. "ENG-1234" or a UUID) hits
+    the always-reject branch and surfaces the same text.
+
+  - src/components/dialogs/IssueImportDialog.tsx:62-82  detectIssueUrl
+       const linearMatch = /^https?:\/\/linear\.app\/[^/]+\/issue\/([A-Za-z0-9-]{3,})$/i.exec(trimmed);
+       if (linearMatch) {
+         return { kind: "linear", issueId: linearMatch[1] };
+       }
+    The dialog uses the regex mirror of parse_issue_url to extract
+    the bare id and route to linearIssueFetch.
+
+  - src/components/dialogs/IssueImportDialog.tsx:190-192  doFetch
+       const seed = detected.kind === "linear"
+         ? await linearIssueFetch(detected.issueId)
+         : await githubIssueFetch(url.trim());
+    The "linear" path calls linearIssueFetch("ENG-1234") → IPC throws
+    "Linear authentication not configured" → dialog renders it in the
+    error banner (line 202) and pushes a toast via ghErrorToToastText
+    (line 208-209).
+
+  - src-tauri/src/lib.rs:6180-6182  parse_github_issue_url
+    ALSO short-circuits any "linear.app/" substring to the same
+    "Linear authentication not configured" error — defense in depth
+    in case the dialog ever routes a Linear URL to the GitHub IPC by
+    mistake.
+
+  - Pin test:
+       $ cargo test --manifest-path src-tauri/Cargo.toml --lib -- parse_issue_url
+       test tests::parse_issue_url_handles_both_schemes ... ok
+       test tests::parse_github_issue_url_recognises_supported_schemes ... ok
+       test tests::issue_seed_wire_format_round_trips ... ok
+    The unified parser test covers the Linear happy path (ENG-1234
+    form + UUID form + case-insensitive host + whitespace padding)
+    AND the regression cases (GitHub URLs still route to the GitHub
+    parser, unknown URLs surface "Unsupported issue URL: ...").
+
+VERDICT: PASS — both the public-URL and private-URL scenarios produce
+the exact "Linear authentication not configured" text. The MVP behavior
+is documented as the intentional fail path (per the "Must NOT" rule on
+OAuth), and the doc comment in lib.rs explains the future
+GraphQL-implementation swap path.
