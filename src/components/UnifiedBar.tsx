@@ -14,6 +14,7 @@ import { Check } from "lucide-react";
 import {
   PanelLeft, PanelRight, FolderOpen, Play, Archive, ShieldCheck, Shield,
   Sun, Moon, Monitor, Zap, ArrowUpToLine, Sunrise, Droplet, Binary, Code2,
+  GitPullRequest,
 } from "lucide-react";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { UpdaterBanner } from "@/components/UpdaterBanner";
@@ -38,6 +39,7 @@ export function UnifiedBar() {
   const ws = useActiveWorkspace();
   const proj = useApp(s => ws ? s.projects.find(p => p.id === ws.project_id) : null);
   const openReview = useUI(s => s.openReview);
+  const openPrCreate = useUI(s => s.openPrCreate);
   const themeMode = usePrefs(s => s.themeMode);
   const setThemeMode = usePrefs(s => s.setThemeMode);
   const yoloMode = usePrefs(s => s.yoloMode);
@@ -229,6 +231,28 @@ export function UnifiedBar() {
                 <span>Review</span>
               </Button>
             </Tip>
+            {(() => {
+              const canCreatePr = !proj.non_git && !ws.is_repo_root;
+              const tip = canCreatePr
+                ? "Create pull request"
+                : proj.non_git
+                  ? "PRs require a git repository"
+                  : "Create a PR from a worktree workspace, not the repo root";
+              return (
+                <Tip content={tip} side="bottom">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-disabled={!canCreatePr}
+                    onClick={() => { if (canCreatePr) openPrCreate(ws.id); }}
+                    className={cn("gap-1.5", !canCreatePr && "opacity-50")}
+                  >
+                    <GitPullRequest className="h-4 w-4" />
+                    <span>Create PR</span>
+                  </Button>
+                </Tip>
+              );
+            })()}
             {/* Send-to-main: only shown on actual worktrees, not the
                 repo-root pseudo-workspace (which IS the main checkout —
                 nothing to send). Hard-blocks on a dirty main checkout

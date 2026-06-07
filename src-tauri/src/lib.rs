@@ -5872,11 +5872,25 @@ fn gh_resolve_path() -> String {
         c.arg("gh");
         c
     };
-    probe.output().ok()
+    probe
+        .env("PATH", shell_env::resolved_path())
+        .output()
+        .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_default()
+}
+
+fn gh_command() -> Command {
+    let path = gh_resolve_path();
+    let mut cmd = if path.is_empty() {
+        Command::new("gh")
+    } else {
+        Command::new(path)
+    };
+    cmd.env("PATH", shell_env::resolved_path());
+    cmd
 }
 
 /// Parse `gh auth status` output. The CLI prints something like:
@@ -5915,9 +5929,7 @@ fn gh_probe_auth() -> (bool, Option<String>) {
     // Capture both stdout AND stderr — the "Logged in to github.com as
     // X" line moves between streams across gh versions, and a regex
     // pass is cheaper than pinning to a specific stream.
-    let out = Command::new("gh")
-        .args(["auth", "status"])
-        .output();
+    let out = gh_command().args(["auth", "status"]).output();
     let out = match out {
         Ok(o) => o,
         Err(_) => return (false, None),
@@ -5978,18 +5990,35 @@ async fn github_status() -> GithubStatus {
 // "No PR for this branch" is NOT an error — the success payload has
 // `pr: null, checks: []` and the UI renders the "No PR or checks found" state.
 
+fn is_no_pr_for_branch(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    (lower.contains("no pull requests found")
+        || lower.contains("no pull request found")
+        || lower.contains("could not find a pull request")
+        || lower.contains("no pr found")
+        || lower.contains("no pr") && lower.contains("not found"))
+        && (lower.contains("branch") || lower.contains("head") || lower.contains("pr"))
+}
+
 /// Run `gh pr view <branch> --json …` in `cwd` and return the parsed PR
 /// metadata, or `Ok(None)` when the branch has no associated PR
 /// (non-zero exit with a "no pull requests found" message on stderr).
 fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequest>> {
-    let out = Command::new("gh")
+    let out = gh_command()
         .args([
             "pr", "view", branch,
             "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft,headRefOid",
         ])
         .current_dir(cwd)
         .output()
-        .with_context(|| format!("gh pr view {} (cwd={})", branch, cwd.display()))?;
+        .map_err(|e| {
+            anyhow!(
+                "gh_unavailable: failed to spawn gh pr view {} (cwd={}): {}",
+                branch,
+                cwd.display(),
+                e
+            )
+        })?;
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
         // "no pull requests found for branch <X>" → branch has no PR.
@@ -5997,9 +6026,7 @@ fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequ
         // error toast. The `gh` exit code is 4 in this case (cmd 4
         // = resource not found), but we match the message instead of
         // the code so we're tolerant of future gh versions.
-        if stderr.to_lowercase().contains("no pull requests found")
-            || stderr.to_lowercase().contains("no pr") && stderr.to_lowercase().contains("not found")
-        {
+        if is_no_pr_for_branch(&stderr) {
             return Ok(None);
         }
         return Err(classify_gh_error(&out.status, &stderr));
@@ -6010,6 +6037,7 @@ fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequ
     // shape via a private DTO so the rest of the file stays snake_case
     // on both sides — the rule from CLAUDE.md.
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct GhPrDto {
         number: u64,
         title: String,
@@ -6060,14 +6088,21 @@ fn gh_pr_view_blocking(cwd: &Path, branch: &str) -> Result<Option<GitHubPullRequ
 /// REST API path below, and an empty checks list is otherwise a
 /// legitimate state.
 fn gh_pr_checks_list_blocking(cwd: &Path, branch: &str) -> Result<Vec<GitHubCheckRun>> {
-    let out = Command::new("gh")
+    let out = gh_command()
         .args([
             "pr", "checks", branch,
             "--json", "name,state,conclusion,detailsUrl,startedAt,completedAt",
         ])
         .current_dir(cwd)
         .output()
-        .with_context(|| format!("gh pr checks {} (cwd={})", branch, cwd.display()))?;
+        .map_err(|e| {
+            anyhow!(
+                "gh_unavailable: failed to spawn gh pr checks {} (cwd={}): {}",
+                branch,
+                cwd.display(),
+                e
+            )
+        })?;
     // Empty stdout + non-zero exit on a valid PR usually means "no
     // checks" or "gh version doesn't support --json here". Either way:
     // empty list, no escalation. Auth / rate-limit errors are still
@@ -6082,6 +6117,7 @@ fn gh_pr_checks_list_blocking(cwd: &Path, branch: &str) -> Result<Vec<GitHubChec
     // DTO so the `GitHubCheckRun` wire shape stays consistent with
     // the rest of the file (snake_case on BOTH sides).
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct GhCheckDto {
         name: String,
         state: String,
@@ -6375,7 +6411,7 @@ fn github_issue_fetch_blocking(url: String) -> Result<IssueSeed, String> {
     // The `--jq` filter must produce a JSON OBJECT (not an array)
     // so `serde_json::from_str` deserializes it into a struct.
     let endpoint = format!("repos/{}/{}/issues/{}", owner, repo, number);
-    let out = Command::new("gh")
+    let out = gh_command()
         .args([
             "api", &endpoint,
             "--jq", "{title: .title, body: .body, number: .number, html_url: .html_url}",
@@ -6584,7 +6620,7 @@ fn github_pr_create_blocking(
         "--body", &body,
     ];
     if draft { args.push("--draft"); }
-    let out = Command::new("gh")
+    let out = gh_command()
         .args(&args)
         .current_dir(&cwd)
         .output()
@@ -6610,7 +6646,7 @@ fn github_pr_create_blocking(
 /// and the "no pull requests found" detection doesn't apply (we
 /// just got the URL from the create call — it has to exist).
 fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHubPullRequest, String> {
-    let out = Command::new("gh")
+    let out = gh_command()
         .args([
             "pr", "view", url,
             "--json", "number,title,body,state,headRefName,baseRefName,url,isDraft,headRefOid",
@@ -6624,6 +6660,7 @@ fn gh_pr_view_by_url_blocking(cwd: &std::path::Path, url: &str) -> Result<GitHub
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct GhPrDto {
         number: u64,
         title: String,
@@ -6769,7 +6806,7 @@ fn github_pr_merge_blocking(
     // can only be a u64, so no shell-injection surface. `--delete-branch`
     // matches `gh`'s default of "delete the head ref after a successful
     // merge" — see module-level comment for the rationale.
-    let out = Command::new("gh")
+    let out = gh_command()
         .args([
             "pr", "merge", &pr_number.to_string(),
             &format!("--{}", method),
@@ -6919,7 +6956,7 @@ fn github_pr_post_diff_comment_blocking(
     // we parse it directly rather than going through `-q` + a jq
     // expression (avoids a shell quoting landmine and keeps the
     // error path obvious).
-    let repo_out = Command::new("gh")
+    let repo_out = gh_command()
         .args(["repo", "view", "--json", "owner,nameWithOwner"])
         .current_dir(&cwd)
         .output()
@@ -6965,7 +7002,7 @@ fn github_pr_post_diff_comment_blocking(
     let commit_id_arg = format!("commit_id={}", commit_id);
     let path_arg = format!("path={}", path);
     let side_arg = format!("side={}", side);
-    let out = Command::new("gh")
+    let out = gh_command()
         .args([
             "api", &url,
             "-f", &body_arg,
@@ -8146,6 +8183,92 @@ mod tests {
         let s = serde_json::to_string(&bundle_empty).unwrap();
         assert!(s.contains("\"pr\":null"),
             "pr=null must serialize as JSON null, got: {s}");
+    }
+
+    #[test]
+    fn gh_pr_and_checks_camel_case_json_deserializes() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct GhPrDto {
+            number: u64,
+            title: String,
+            body: Option<String>,
+            state: String,
+            head_ref_name: String,
+            base_ref_name: String,
+            url: String,
+            is_draft: bool,
+            #[serde(default)]
+            head_ref_oid: Option<String>,
+        }
+
+        let pr_json = r###"{
+            "baseRefName": "staging",
+            "body": "## overview\n`apps/scheduler` style worker",
+            "headRefName": "feature/commerce-consumer",
+            "headRefOid": "abc123",
+            "isDraft": false,
+            "number": 2325,
+            "state": "OPEN",
+            "title": "Add commerce consumer",
+            "url": "https://github.com/acme/widgets/pull/2325"
+        }"###;
+        let pr: GhPrDto = serde_json::from_str(pr_json)
+            .expect("gh pr view camelCase payload must deserialize");
+        assert_eq!(pr.base_ref_name, "staging");
+        assert_eq!(pr.head_ref_name, "feature/commerce-consumer");
+        assert_eq!(pr.head_ref_oid.as_deref(), Some("abc123"));
+        assert!(pr.body.as_deref().unwrap().contains("apps/scheduler"));
+        assert!(!pr.is_draft);
+        assert_eq!(pr.number, 2325);
+        assert_eq!(pr.state, "OPEN");
+        assert_eq!(pr.title, "Add commerce consumer");
+        assert!(pr.url.ends_with("/2325"));
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct GhCheckDto {
+            name: String,
+            state: String,
+            conclusion: Option<String>,
+            details_url: Option<String>,
+            started_at: String,
+            completed_at: Option<String>,
+        }
+
+        let checks_json = r#"[
+            {
+                "name": "build",
+                "state": "SUCCESS",
+                "conclusion": "success",
+                "detailsUrl": "https://github.com/acme/widgets/actions/runs/123",
+                "startedAt": "2026-06-07T10:00:00Z",
+                "completedAt": "2026-06-07T10:05:30Z"
+            }
+        ]"#;
+        let checks: Vec<GhCheckDto> = serde_json::from_str(checks_json)
+            .expect("gh pr checks camelCase payload must deserialize");
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].state, "SUCCESS");
+        assert_eq!(checks[0].conclusion.as_deref(), Some("success"));
+        assert_eq!(checks[0].details_url.as_deref(), Some("https://github.com/acme/widgets/actions/runs/123"));
+        assert_eq!(checks[0].started_at, "2026-06-07T10:00:00Z");
+        assert_eq!(checks[0].completed_at.as_deref(), Some("2026-06-07T10:05:30Z"));
+    }
+
+    #[test]
+    fn no_pr_detection_accepts_common_gh_messages() {
+        for stderr in [
+            "no pull requests found for branch \"feature/widget\"\n",
+            "no pull request found for branch feature/widget\n",
+            "could not find a pull request for branch \"feature/widget\"\n",
+            "no PR found for head ref feature/widget\n",
+        ] {
+            assert!(is_no_pr_for_branch(stderr),
+                "expected no-PR stderr to be accepted: {stderr:?}");
+        }
+        assert!(!is_no_pr_for_branch("HTTP 500: unexpected network error"),
+            "unrelated gh errors must still bubble as errors");
     }
 
     /// `classify_gh_error` must produce the stable error-code prefixes
